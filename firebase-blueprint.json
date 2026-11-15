@@ -1,0 +1,853 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Profil pengguna dan hak akses Admin atau Kasir.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 160 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "role": { "type": "string", "enum": ["admin", "kasir", "pending"] },
+        "status": { "type": "string", "enum": ["active", "inactive", "pending"] },
+        "shiftLabel": { "type": "string", "maxLength": 40 },
+        "phone": { "type": "string", "maxLength": 24 },
+        "claimedInviteId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "isPrimaryAdmin": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "status", "createdAt", "updatedAt"]
+    },
+    "SystemBootstrapConfig": {
+      "title": "SystemBootstrapConfig",
+      "description": "Kunci tunggal Admin Utama pertama agar bootstrap admin hanya terjadi satu kali secara atomik.",
+      "type": "object",
+      "properties": {
+        "primaryAdminUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "claimedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["primaryAdminUid", "claimedAt"]
+    },
+    "StaffInvite": {
+      "title": "StaffInvite",
+      "description": "Prapendaftaran email untuk akses Admin atau Kasir.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 160 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "role": { "type": "string", "enum": ["admin", "kasir"] },
+        "shiftLabel": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["pending", "claimed"] },
+        "invitedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "displayName", "role", "status", "invitedByUid", "createdAt", "updatedAt"]
+    },
+    "StoreSetting": {
+      "title": "StoreSetting",
+      "description": "Identitas dan pengaturan operasional warung.",
+      "type": "object",
+      "properties": {
+        "storeName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "ownerName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "address": { "type": "string", "maxLength": 240 },
+        "phone": { "type": "string", "maxLength": 24 },
+        "receiptHeader": { "type": "string", "maxLength": 200 },
+        "receiptThankYou": { "type": "string", "maxLength": 200 },
+        "receiptFooter": { "type": "string", "maxLength": 200 },
+        "qrisFeePercent": { "type": "number" },
+        "hppMethod": { "type": "string", "enum": ["moving_average", "fifo"] },
+        "dailySalesTarget": { "type": "number" },
+        "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["storeName", "ownerName", "updatedByUid", "updatedAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Kategori produk mini retail.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "description": { "type": "string", "maxLength": 200 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Master produk mini retail.",
+      "type": "object",
+      "properties": {
+        "sku": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "barcode": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "photoDataUrl": { "type": "string", "maxLength": 80000 },
+        "categoryId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "categoryName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "unit": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "baseCanBuy": { "type": "boolean" },
+        "baseCanSell": { "type": "boolean" },
+        "costPrice": { "type": "number" },
+        "sellPrice": { "type": "number" },
+        "wholesalePrice": { "type": "number" },
+        "wholesaleMinQty": { "type": "number" },
+        "sellUnits": { "type": "array", "description": "Daftar satuan pembelian dan penjualan konversi terhadap satuan dasar termasuk harga beli, harga jual, dan mode konversi eceran (maksimal 15 satuan)." },
+        "stock": { "type": "number" },
+        "minStock": { "type": "number" },
+        "isActive": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sku", "name", "categoryId", "categoryName", "unit", "costPrice", "sellPrice", "stock", "minStock", "isActive", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "PriceHistory": {
+      "title": "PriceHistory",
+      "description": "Riwayat perubahan harga modal, harga ecer, harga grosir, dan satuan jual produk.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "baseUnit": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "changeType": { "type": "string", "enum": ["initial", "update"] },
+        "costPriceBefore": { "type": "number" },
+        "costPriceAfter": { "type": "number" },
+        "sellPriceBefore": { "type": "number" },
+        "sellPriceAfter": { "type": "number" },
+        "wholesalePriceBefore": { "type": "number" },
+        "wholesalePriceAfter": { "type": "number" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "productId", "productName", "baseUnit", "changeType", "costPriceBefore", "costPriceAfter", "sellPriceBefore", "sellPriceAfter", "summary", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "StockMovement": {
+      "title": "StockMovement",
+      "description": "Riwayat pergerakan stok barang dalam satuan dasar.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "baseUnit": { "type": "string", "maxLength": 24 },
+        "unitName": { "type": "string", "maxLength": 24 },
+        "unitQuantity": { "type": "number" },
+        "conversion": { "type": "number" },
+        "type": { "type": "string", "enum": ["in", "out", "adjustment"] },
+        "quantity": { "type": "number" },
+        "stockBefore": { "type": "number" },
+        "stockAfter": { "type": "number" },
+        "referenceId": { "type": "string", "maxLength": 128 },
+        "notes": { "type": "string", "maxLength": 240 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "productId", "productName", "type", "quantity", "stockBefore", "stockAfter", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "Header transaksi penjualan retail.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "customerName": { "type": "string", "maxLength": 100 },
+        "totalItems": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "discount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "totalCost": { "type": "number" },
+        "totalProfit": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "changeAmount": { "type": "number" },
+        "debtAmount": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["cash", "transfer", "qris", "mixed", "debt"] },
+        "cashPaidPart": { "type": "number" },
+        "qrisAmount": { "type": "number" },
+        "qrisFeeRate": { "type": "number" },
+        "qrisFeeAmount": { "type": "number" },
+        "netReceivedAmount": { "type": "number" },
+        "accountId": { "type": "string", "maxLength": 128 },
+        "qrisAccountId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["completed", "void"] },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "totalItems", "subtotal", "discount", "totalAmount", "paidAmount", "changeAmount", "debtAmount", "paymentMethod", "status", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "SaleItem": {
+      "title": "SaleItem",
+      "description": "Item baris penjualan retail.",
+      "type": "object",
+      "properties": {
+        "saleId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "unitName": { "type": "string", "maxLength": 24 },
+        "conversion": { "type": "number" },
+        "baseQuantity": { "type": "number" },
+        "priceTier": { "type": "string", "enum": ["retail", "wholesale"] },
+        "quantity": { "type": "number" },
+        "costPrice": { "type": "number" },
+        "unitPrice": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "profit": { "type": "number" },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["saleId", "productId", "productName", "quantity", "costPrice", "unitPrice", "subtotal", "recordedByUid", "createdAt"]
+    },
+    "Purchase": {
+      "title": "Purchase",
+      "description": "Header transaksi pembelian / kulakan barang.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "invoiceNumber": { "type": "string", "maxLength": 60 },
+        "supplierId": { "type": "string", "maxLength": 128 },
+        "supplierName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "subtotal": { "type": "number" },
+        "discount": { "type": "number" },
+        "extraCost": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "debtAmount": { "type": "number" },
+        "returnedAmount": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["cash", "transfer", "credit", "partial"] },
+        "paymentStatus": { "type": "string", "enum": ["paid", "partial", "unpaid"] },
+        "accountId": { "type": "string", "maxLength": 128 },
+        "accountName": { "type": "string", "maxLength": 80 },
+        "notes": { "type": "string", "maxLength": 240 },
+        "status": { "type": "string", "enum": ["completed", "void"] },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "supplierName", "totalAmount", "paymentMethod", "status", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "PurchaseItem": {
+      "title": "PurchaseItem",
+      "description": "Item baris pembelian barang beserta konversi satuan dan riwayat HPP.",
+      "type": "object",
+      "properties": {
+        "purchaseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "unitName": { "type": "string", "maxLength": 24 },
+        "baseUnit": { "type": "string", "maxLength": 24 },
+        "conversion": { "type": "number" },
+        "baseQuantity": { "type": "number" },
+        "quantity": { "type": "number" },
+        "unitCost": { "type": "number" },
+        "lineDiscount": { "type": "number" },
+        "allocatedExtraCost": { "type": "number" },
+        "netLineTotal": { "type": "number" },
+        "effectiveBaseUnitCost": { "type": "number" },
+        "hppBefore": { "type": "number" },
+        "hppAfter": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["purchaseId", "productId", "productName", "quantity", "unitCost", "subtotal", "recordedByUid", "createdAt"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Data pemasok / supplier barang warung (khusus Admin).",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "phone": { "type": "string", "maxLength": 24 },
+        "address": { "type": "string", "maxLength": 200 },
+        "notes": { "type": "string", "maxLength": 200 },
+        "totalDebt": { "type": "number" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "totalDebt", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "SupplierPayment": {
+      "title": "SupplierPayment",
+      "description": "Riwayat pembayaran utang pembelian ke pemasok.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "purchaseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "purchaseNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "invoiceNumber": { "type": "string", "maxLength": 60 },
+        "supplierId": { "type": "string", "maxLength": 128 },
+        "supplierName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "amount": { "type": "number" },
+        "debtBefore": { "type": "number" },
+        "debtAfter": { "type": "number" },
+        "accountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "accountName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "notes": { "type": "string", "maxLength": 240 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "purchaseId", "purchaseNumber", "supplierName", "amount", "debtBefore", "debtAfter", "accountId", "accountName", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "PurchaseReturn": {
+      "title": "PurchaseReturn",
+      "description": "Riwayat retur barang pembelian ke pemasok dengan pengurangan stok dan penyesuaian utang atau kas.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "purchaseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "purchaseNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "supplierId": { "type": "string", "maxLength": 128 },
+        "supplierName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "unitName": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "baseUnit": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "conversion": { "type": "number" },
+        "returnQty": { "type": "number" },
+        "returnBaseQty": { "type": "number" },
+        "unitRefundPrice": { "type": "number" },
+        "refundTotal": { "type": "number" },
+        "settlementType": { "type": "string", "enum": ["reduce_debt", "cash_refund", "mixed"] },
+        "debtReducedAmount": { "type": "number" },
+        "cashRefundAmount": { "type": "number" },
+        "accountId": { "type": "string", "maxLength": 128 },
+        "accountName": { "type": "string", "maxLength": 80 },
+        "reason": { "type": "string", "maxLength": 240 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "purchaseId", "purchaseNumber", "supplierName", "productId", "productName", "unitName", "baseUnit", "conversion", "returnQty", "returnBaseQty", "unitRefundPrice", "refundTotal", "settlementType", "debtReducedAmount", "cashRefundAmount", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Data pelanggan warung.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "phone": { "type": "string", "maxLength": 24 },
+        "address": { "type": "string", "maxLength": 200 },
+        "totalDebt": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 200 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "totalDebt", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "Receivable": {
+      "title": "Receivable",
+      "description": "Catatan piutang dan pembayaran kasbon pelanggan.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "customerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "customerName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "type": { "type": "string", "enum": ["debt", "payment"] },
+        "amount": { "type": "number" },
+        "balanceAfter": { "type": "number" },
+        "saleId": { "type": "string", "maxLength": 128 },
+        "accountId": { "type": "string", "maxLength": 128 },
+        "notes": { "type": "string", "maxLength": 240 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "customerId", "customerName", "type", "amount", "balanceAfter", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "Loan": {
+      "title": "Loan",
+      "description": "Pinjaman uang tunai/rekening kepada pelanggan yang dikelola Admin.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "borrowerName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "borrowerPhone": { "type": "string", "maxLength": 24 },
+        "loanDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "dueDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "principalAmount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "remainingAmount": { "type": "number" },
+        "sourceAccountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sourceAccountName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "sourceAccountType": { "type": "string", "enum": ["cash", "bank", "ewallet", "ppob_deposit"] },
+        "status": { "type": "string", "enum": ["unpaid", "partial", "paid"] },
+        "notes": { "type": "string", "maxLength": 240 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "borrowerName", "loanDate", "dueDate", "principalAmount", "paidAmount", "remainingAmount", "sourceAccountId", "sourceAccountName", "sourceAccountType", "status", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "LoanPayment": {
+      "title": "LoanPayment",
+      "description": "Catatan cicilan dan pelunasan pinjaman uang pelanggan.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "loanId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "loanNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "borrowerName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "amount": { "type": "number" },
+        "remainingBefore": { "type": "number" },
+        "remainingAfter": { "type": "number" },
+        "accountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "accountName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "notes": { "type": "string", "maxLength": 240 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "loanId", "loanNumber", "borrowerName", "amount", "remainingBefore", "remainingAfter", "accountId", "accountName", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "MiniAtmSetting": {
+      "title": "MiniAtmSetting",
+      "description": "Pengaturan tarif bertingkat, biaya bank per tujuan, dan aktivasi QRIS Tarik Tunai Mini ATM.",
+      "type": "object",
+      "properties": {
+        "allowQrisTarikTunai": { "type": "boolean" },
+        "qrisProviderNote": { "type": "string", "maxLength": 200 },
+        "qrisMdrPercent": { "type": "number" },
+        "qrisInternalExtraThreshold": { "type": "number" },
+        "qrisInternalExtraFee": { "type": "number" },
+        "defaultTarikTunaiFee": { "type": "number" },
+        "defaultTransferFee": { "type": "number" },
+        "feeTiers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "serviceScope": { "type": "string", "enum": ["all", "tarik_tunai", "transfer"] },
+              "minAmount": { "type": "number" },
+              "maxAmount": { "type": "number" },
+              "adminFee": { "type": "number" },
+              "bankFee": { "type": "number" }
+            },
+            "required": ["id", "serviceScope", "minAmount", "maxAmount", "adminFee"]
+          }
+        },
+        "bankFeeRules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "bankName": { "type": "string" },
+              "defaultBankFee": { "type": "number" }
+            },
+            "required": ["bankName", "defaultBankFee"]
+          }
+        },
+        "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedByName": { "type": "string", "maxLength": 100 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["allowQrisTarikTunai", "qrisMdrPercent", "qrisInternalExtraThreshold", "qrisInternalExtraFee", "defaultTarikTunaiFee", "defaultTransferFee", "feeTiers", "bankFeeRules", "updatedByUid", "updatedAt"]
+    },
+    "MiniAtmFeeAudit": {
+      "title": "MiniAtmFeeAudit",
+      "description": "Log audit perubahan tarif jasa atau biaya bank per transaksi oleh kasir/admin.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "miniAtmTxId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "serviceType": { "type": "string", "enum": ["tarik_tunai", "transfer", "setor_tunai"] },
+        "bankName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "principalAmount": { "type": "number" },
+        "standardAdminFee": { "type": "number" },
+        "appliedAdminFee": { "type": "number" },
+        "standardBankFee": { "type": "number" },
+        "appliedBankFee": { "type": "number" },
+        "reason": { "type": "string", "maxLength": 200 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "miniAtmTxId", "serviceType", "bankName", "principalAmount", "standardAdminFee", "appliedAdminFee", "standardBankFee", "appliedBankFee", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "MiniAtmTransaction": {
+      "title": "MiniAtmTransaction",
+      "description": "Transaksi layanan Mini ATM (tarik tunai, transfer, serta kompatibilitas riwayat setor tunai lama).",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "serviceType": { "type": "string", "enum": ["tarik_tunai", "transfer", "setor_tunai"] },
+        "paymentChannel": { "type": "string", "enum": ["bank_transfer", "qris"] },
+        "bankName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "targetAccountNumber": { "type": "string", "maxLength": 40 },
+        "customerName": { "type": "string", "maxLength": 100 },
+        "principalAmount": { "type": "number" },
+        "adminFee": { "type": "number" },
+        "bankFee": { "type": "number" },
+        "qrisVerified": { "type": "boolean" },
+        "transferVerified": { "type": "boolean" },
+        "qrisMdrRate": { "type": "number" },
+        "qrisMdrAmount": { "type": "number" },
+        "internalExtraFee": { "type": "number" },
+        "externalReferenceNumber": { "type": "string", "maxLength": 80 },
+        "transferProofDataUrl": { "type": "string", "maxLength": 80000 },
+        "standardAdminFee": { "type": "number" },
+        "standardBankFee": { "type": "number" },
+        "feeOverridden": { "type": "boolean" },
+        "feeOverrideReason": { "type": "string", "maxLength": 200 },
+        "netProfit": { "type": "number" },
+        "cashAccountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bankAccountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "notes": { "type": "string", "maxLength": 240 },
+        "status": { "type": "string", "enum": ["completed", "void"] },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "serviceType", "bankName", "principalAmount", "adminFee", "bankFee", "netProfit", "cashAccountId", "bankAccountId", "status", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "PpobTransaction": {
+      "title": "PpobTransaction",
+      "description": "Transaksi PPOB (pulsa, data, listrik PLN, PDAM, BPJS, e-wallet).",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "category": { "type": "string", "enum": ["pulsa", "paket_data", "pln", "pdam", "bpjs", "ewallet", "lainnya"] },
+        "providerName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "targetNumber": { "type": "string", "minLength": 3, "maxLength": 50 },
+        "customerName": { "type": "string", "maxLength": 100 },
+        "capitalPrice": { "type": "number" },
+        "sellPrice": { "type": "number" },
+        "adminFee": { "type": "number" },
+        "netProfit": { "type": "number" },
+        "accountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "cashAccountId": { "type": "string", "maxLength": 128 },
+        "serialNumber": { "type": "string", "maxLength": 100 },
+        "status": { "type": "string", "enum": ["completed", "pending", "failed"] },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "category", "providerName", "targetNumber", "capitalPrice", "sellPrice", "adminFee", "netProfit", "accountId", "status", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "Account": {
+      "title": "Account",
+      "description": "Akun saldo kas laci, rekening bank, e-wallet, dan deposit PPOB.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "type": { "type": "string", "enum": ["cash", "bank", "ewallet", "ppob_deposit"] },
+        "accountNumber": { "type": "string", "maxLength": 40 },
+        "balance": { "type": "number" },
+        "isActive": { "type": "boolean" },
+        "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "type", "balance", "isActive", "updatedByUid", "createdAt", "updatedAt"]
+    },
+    "CashLedger": {
+      "title": "CashLedger",
+      "description": "Buku mutasi arus kas masuk dan keluar pada akun kas/rekening.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "accountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "accountName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "direction": { "type": "string", "enum": ["in", "out"] },
+        "amount": { "type": "number" },
+        "balanceBefore": { "type": "number" },
+        "balanceAfter": { "type": "number" },
+        "sourceModule": { "type": "string", "enum": ["sale", "purchase", "mini_atm", "ppob", "expense", "receivable", "capital", "transfer", "loan"] },
+        "referenceId": { "type": "string", "maxLength": 128 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "accountId", "accountName", "direction", "amount", "balanceBefore", "balanceAfter", "sourceModule", "description", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Catatan pengeluaran operasional warung.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "category": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "amount": { "type": "number" },
+        "accountId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "accountName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "category", "description", "amount", "accountId", "accountName", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "FinancialSummary": {
+      "title": "FinancialSummary",
+      "description": "Rekapitulasi laporan keuangan harian dan bulanan.",
+      "type": "object",
+      "properties": {
+        "periodType": { "type": "string", "enum": ["daily", "monthly"] },
+        "periodKey": { "type": "string", "minLength": 4, "maxLength": 20 },
+        "totalSales": { "type": "number" },
+        "totalPurchases": { "type": "number" },
+        "totalMiniAtmVolume": { "type": "number" },
+        "totalMiniAtmProfit": { "type": "number" },
+        "totalPpobVolume": { "type": "number" },
+        "totalPpobProfit": { "type": "number" },
+        "totalExpenses": { "type": "number" },
+        "netProfit": { "type": "number" },
+        "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["periodType", "periodKey", "totalSales", "totalPurchases", "totalMiniAtmVolume", "totalMiniAtmProfit", "totalPpobVolume", "totalPpobProfit", "totalExpenses", "netProfit", "updatedByUid", "updatedAt"]
+    },
+    "ResetAuditLog": {
+      "title": "ResetAuditLog",
+      "description": "Catatan riwayat aktivitas reset data operasional oleh Admin.",
+      "type": "object",
+      "properties": {
+        "resetType": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "resetLabel": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "itemsDeletedCount": { "type": "number" },
+        "details": { "type": "string", "maxLength": 1000 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["resetType", "resetLabel", "itemsDeletedCount", "details", "recordedByUid", "recordedByName", "createdAt"]
+    },
+    "StockOpname": {
+      "title": "StockOpname",
+      "description": "Sesi stok opname fisik produk beserta status draft atau final dan ringkasan selisih.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "categoryFilterId": { "type": "string", "maxLength": 128 },
+        "categoryFilterName": { "type": "string", "maxLength": 60 },
+        "status": { "type": "string", "enum": ["draft", "finalized"] },
+        "startedAtMs": { "type": "number" },
+        "lastSavedAt": { "type": "string", "format": "date-time" },
+        "finalizedAt": { "type": "string", "format": "date-time" },
+        "finalizedByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "finalizedByName": { "type": "string", "maxLength": 100 },
+        "finalizedDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "finalizedTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "totalProducts": { "type": "number" },
+        "countedProducts": { "type": "number" },
+        "matchedCount": { "type": "number" },
+        "surplusCount": { "type": "number" },
+        "deficitCount": { "type": "number" },
+        "totalVarianceValue": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 300 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "title", "status", "startedAtMs", "totalProducts", "countedProducts", "matchedCount", "surplusCount", "deficitCount", "totalVarianceValue", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "StockOpnameItem": {
+      "title": "StockOpnameItem",
+      "description": "Baris pemeriksaan stok fisik per produk dalam sebuah sesi stok opname.",
+      "type": "object",
+      "properties": {
+        "opnameId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sku": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "barcode": { "type": "string", "maxLength": 64 },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "categoryId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "categoryName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "baseUnit": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "costPrice": { "type": "number" },
+        "systemStockAtStart": { "type": "number" },
+        "systemStockAtCount": { "type": "number" },
+        "movementSinceStart": { "type": "number" },
+        "physicalUnitName": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "physicalUnitQty": { "type": "number" },
+        "physicalSubUnitName": { "type": "string", "maxLength": 24 },
+        "physicalSubUnitQty": { "type": "number" },
+        "physicalStockBase": { "type": "number" },
+        "varianceBase": { "type": "number" },
+        "varianceStatus": { "type": "string", "enum": ["uncounted", "match", "surplus", "deficit"] },
+        "finalStockApplied": { "type": "number" },
+        "reason": { "type": "string", "maxLength": 240 },
+        "isCounted": { "type": "boolean" },
+        "countedAtMs": { "type": "number" },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["opnameId", "productId", "sku", "productName", "categoryId", "categoryName", "baseUnit", "costPrice", "systemStockAtStart", "systemStockAtCount", "movementSinceStart", "physicalUnitName", "physicalUnitQty", "varianceBase", "varianceStatus", "isCounted", "recordedByUid", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/system_config/{configId}": {
+      "schema": { "$ref": "#/entities/SystemBootstrapConfig" },
+      "description": "Kunci konfigurasi bootstrap Admin Utama pertama."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Dokumen profil pengguna dan peran (Admin / Kasir)."
+    },
+    "/staff_invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/StaffInvite" },
+      "description": "Undangan email untuk staf Admin atau Kasir."
+    },
+    "/store_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/StoreSetting" },
+      "description": "Pengaturan profil warung."
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Kategori produk mini retail."
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Daftar produk mini retail beserta satuan dasar dan satuan konversi."
+    },
+    "/price_history/{historyId}": {
+      "schema": { "$ref": "#/entities/PriceHistory" },
+      "description": "Riwayat perubahan harga beli, ecer, dan grosir produk."
+    },
+    "/stock_movements/{movementId}": {
+      "schema": { "$ref": "#/entities/StockMovement" },
+      "description": "Log pergerakan stok barang."
+    },
+    "/sales/{saleId}": {
+      "schema": { "$ref": "#/entities/Sale" },
+      "description": "Header transaksi penjualan retail."
+    },
+    "/sales/{saleId}/items/{itemId}": {
+      "schema": { "$ref": "#/entities/SaleItem" },
+      "description": "Detail item penjualan retail."
+    },
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Data pemasok barang warung (khusus Admin)."
+    },
+    "/purchases/{purchaseId}": {
+      "schema": { "$ref": "#/entities/Purchase" },
+      "description": "Header transaksi pembelian barang."
+    },
+    "/purchases/{purchaseId}/items/{itemId}": {
+      "schema": { "$ref": "#/entities/PurchaseItem" },
+      "description": "Detail item pembelian barang."
+    },
+    "/supplier_payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/SupplierPayment" },
+      "description": "Riwayat pembayaran utang pembelian ke pemasok."
+    },
+    "/purchase_returns/{returnId}": {
+      "schema": { "$ref": "#/entities/PurchaseReturn" },
+      "description": "Riwayat retur barang pembelian ke pemasok."
+    },
+    "/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/Customer" },
+      "description": "Data pelanggan warung."
+    },
+    "/receivables/{receivableId}": {
+      "schema": { "$ref": "#/entities/Receivable" },
+      "description": "Catatan piutang dan pembayaran pelanggan."
+    },
+    "/loans/{loanId}": {
+      "schema": { "$ref": "#/entities/Loan" },
+      "description": "Catatan pinjaman uang pelanggan yang dikelola Admin."
+    },
+    "/loan_payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/LoanPayment" },
+      "description": "Riwayat pembayaran cicilan dan pelunasan pinjaman uang."
+    },
+    "/mini_atm_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/MiniAtmSetting" },
+      "description": "Pengaturan tarif standar, tier nominal, dan kebijakan QRIS Tarik Tunai Mini ATM."
+    },
+    "/mini_atm_fee_audits/{auditId}": {
+      "schema": { "$ref": "#/entities/MiniAtmFeeAudit" },
+      "description": "Log audit perubahan tarif jasa atau biaya bank per transaksi Mini ATM."
+    },
+    "/mini_atm_transactions/{txId}": {
+      "schema": { "$ref": "#/entities/MiniAtmTransaction" },
+      "description": "Transaksi layanan Mini ATM."
+    },
+    "/ppob_transactions/{txId}": {
+      "schema": { "$ref": "#/entities/PpobTransaction" },
+      "description": "Transaksi layanan PPOB."
+    },
+    "/accounts/{accountId}": {
+      "schema": { "$ref": "#/entities/Account" },
+      "description": "Akun saldo kas laci dan rekening bank/e-wallet."
+    },
+    "/cash_ledger/{ledgerId}": {
+      "schema": { "$ref": "#/entities/CashLedger" },
+      "description": "Buku besar mutasi kas dan rekening."
+    },
+    "/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "Catatan pengeluaran operasional warung."
+    },
+    "/financial_summaries/{summaryId}": {
+      "schema": { "$ref": "#/entities/FinancialSummary" },
+      "description": "Ringkasan laporan keuangan harian dan bulanan."
+    },
+    "/reset_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ResetAuditLog" },
+      "description": "Log audit riwayat aktivitas reset data operasional oleh Admin."
+    },
+    "/stock_opnames/{opnameId}": {
+      "schema": { "$ref": "#/entities/StockOpname" },
+      "description": "Header sesi stok opname fisik produk."
+    },
+    "/stock_opnames/{opnameId}/items/{itemId}": {
+      "schema": { "$ref": "#/entities/StockOpnameItem" },
+      "description": "Rincian produk yang diperiksa dalam sesi stok opname."
+    }
+  }
+}

@@ -1,0 +1,1263 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function bootstrapPath() {
+      return /databases/$(database)/documents/system_config/bootstrap;
+    }
+
+    function bootstrapExists() {
+      return exists(bootstrapPath());
+    }
+
+    function isPrimaryAdmin() {
+      return isVerified() &&
+        bootstrapExists() &&
+        get(bootstrapPath()).data.primaryAdminUid == request.auth.uid;
+    }
+
+    function isBootstrapAdmin() {
+      return isVerified() && request.auth.token.email == 'hsbg9427@gmail.com';
+    }
+
+    function userDocPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function isAdmin() {
+      return isPrimaryAdmin() || (
+        isVerified() &&
+        exists(userDocPath(request.auth.uid)) &&
+        get(userDocPath(request.auth.uid)).data.role == 'admin' &&
+        get(userDocPath(request.auth.uid)).data.status == 'active'
+      ) || (!bootstrapExists() && isBootstrapAdmin());
+    }
+
+    function isKasir() {
+      return isVerified() &&
+        exists(userDocPath(request.auth.uid)) &&
+        get(userDocPath(request.auth.uid)).data.role == 'kasir' &&
+        get(userDocPath(request.auth.uid)).data.status == 'active';
+    }
+
+    function isActiveStaff() {
+      return isAdmin() || isKasir();
+    }
+
+    function isValidDateStr(d) {
+      return d is string && d.size() == 10 && d.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function isValidTimeStr(t) {
+      return t is string && t.size() == 8 && t.matches('^\\d{2}:\\d{2}:\\d{2}$');
+    }
+
+    function isValidTrxNum(n) {
+      return n is string && n.size() >= 4 && n.size() <= 40;
+    }
+
+    function isOptString(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    // 3. Entity Validators
+    function isValidBootstrapConfig(data) {
+      return data.keys().hasAll(['primaryAdminUid', 'claimedAt']) &&
+        data.keys().hasOnly(['primaryAdminUid', 'claimedAt']) &&
+        isValidId(data.primaryAdminUid) &&
+        data.claimedAt is timestamp;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'role', 'status', 'shiftLabel', 'phone', 'claimedInviteId', 'isPrimaryAdmin', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        isOptString(data, 'photoURL', 500) &&
+        data.role in ['admin', 'kasir', 'pending'] &&
+        data.status in ['active', 'inactive', 'pending'] &&
+        isOptString(data, 'shiftLabel', 40) &&
+        isOptString(data, 'phone', 24) &&
+        (!('claimedInviteId' in data) || isValidId(data.claimedInviteId)) &&
+        (!('isPrimaryAdmin' in data) || data.isPrimaryAdmin is bool) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidInviteClaim(data) {
+      return ('claimedInviteId' in data) &&
+        isValidId(data.claimedInviteId) &&
+        exists(/databases/$(database)/documents/staff_invites/$(data.claimedInviteId)) &&
+        get(/databases/$(database)/documents/staff_invites/$(data.claimedInviteId)).data.email == request.auth.token.email &&
+        get(/databases/$(database)/documents/staff_invites/$(data.claimedInviteId)).data.status == 'pending' &&
+        data.email == request.auth.token.email &&
+        data.role == get(/databases/$(database)/documents/staff_invites/$(data.claimedInviteId)).data.role &&
+        data.status == 'active';
+    }
+
+    function isValidStaffInvite(data) {
+      return data.keys().hasAll(['email', 'displayName', 'role', 'status', 'invitedByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['email', 'displayName', 'role', 'shiftLabel', 'status', 'invitedByUid', 'createdAt', 'updatedAt']) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        data.role in ['admin', 'kasir'] &&
+        isOptString(data, 'shiftLabel', 40) &&
+        data.status in ['pending', 'claimed'] &&
+        isValidId(data.invitedByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStoreSetting(data) {
+      return data.keys().hasAll(['storeName', 'ownerName', 'updatedByUid', 'updatedAt']) &&
+        data.keys().hasOnly(['storeName', 'ownerName', 'address', 'phone', 'receiptHeader', 'receiptThankYou', 'receiptFooter', 'qrisFeePercent', 'hppMethod', 'dailySalesTarget', 'updatedByUid', 'updatedAt']) &&
+        data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 100 &&
+        data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 100 &&
+        isOptString(data, 'address', 240) &&
+        isOptString(data, 'phone', 24) &&
+        isOptString(data, 'receiptHeader', 200) &&
+        isOptString(data, 'receiptThankYou', 200) &&
+        isOptString(data, 'receiptFooter', 200) &&
+        (!('qrisFeePercent' in data) || (data.qrisFeePercent is number && data.qrisFeePercent >= 0 && data.qrisFeePercent <= 10)) &&
+        (!('hppMethod' in data) || data.hppMethod in ['moving_average', 'fifo']) &&
+        (!('dailySalesTarget' in data) || (data.dailySalesTarget is number && data.dailySalesTarget >= 0 && data.dailySalesTarget <= 1000000000)) &&
+        isValidId(data.updatedByUid) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['name', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'description', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+        isOptString(data, 'description', 200) &&
+        isValidId(data.createdByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSellUnitMap(u) {
+      return u is map &&
+        u.keys().hasAll(['unitName', 'conversion', 'sellPrice']) &&
+        u.keys().hasOnly(['unitName', 'conversion', 'buyPrice', 'sellPrice', 'wholesalePrice', 'wholesaleMinQty', 'canBuy', 'canSell', 'conversionMode', 'perBaseQty']) &&
+        u.unitName is string && u.unitName.size() >= 1 && u.unitName.size() <= 24 &&
+        u.conversion is number && u.conversion > 0 && u.conversion <= 10000000 &&
+        (!('buyPrice' in u) || (u.buyPrice is number && u.buyPrice >= 0)) &&
+        u.sellPrice is number && u.sellPrice >= 0 &&
+        (!('wholesalePrice' in u) || (u.wholesalePrice is number && u.wholesalePrice >= 0)) &&
+        (!('wholesaleMinQty' in u) || (u.wholesaleMinQty is number && u.wholesaleMinQty > 0)) &&
+        (!('canBuy' in u) || u.canBuy is bool) &&
+        (!('canSell' in u) || u.canSell is bool) &&
+        (!('conversionMode' in u) || u.conversionMode in ['multiply', 'divide']) &&
+        (!('perBaseQty' in u) || (u.perBaseQty is number && u.perBaseQty > 0 && u.perBaseQty <= 10000000));
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll(['sku', 'name', 'categoryId', 'categoryName', 'unit', 'costPrice', 'sellPrice', 'stock', 'minStock', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sku', 'barcode', 'name', 'photoDataUrl', 'categoryId', 'categoryName', 'unit', 'baseCanBuy', 'baseCanSell', 'costPrice', 'sellPrice', 'wholesalePrice', 'wholesaleMinQty', 'sellUnits', 'stock', 'minStock', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.sku is string && data.sku.size() >= 1 && data.sku.size() <= 40 &&
+        isOptString(data, 'barcode', 64) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        isOptString(data, 'photoDataUrl', 80000) &&
+        isValidId(data.categoryId) &&
+        data.categoryName is string && data.categoryName.size() >= 1 && data.categoryName.size() <= 60 &&
+        data.unit is string && data.unit.size() >= 1 && data.unit.size() <= 24 &&
+        (!('baseCanBuy' in data) || data.baseCanBuy is bool) &&
+        (!('baseCanSell' in data) || data.baseCanSell is bool) &&
+        data.costPrice is number && data.costPrice >= 0 &&
+        data.sellPrice is number && data.sellPrice >= 0 &&
+        (!('wholesalePrice' in data) || (data.wholesalePrice is number && data.wholesalePrice >= 0)) &&
+        (!('wholesaleMinQty' in data) || (data.wholesaleMinQty is number && data.wholesaleMinQty > 0)) &&
+        (!('sellUnits' in data) || (
+          data.sellUnits is list &&
+          data.sellUnits.size() <= 15 &&
+          (data.sellUnits.size() == 0 || isValidSellUnitMap(data.sellUnits[0]))
+        )) &&
+        data.stock is number &&
+        data.minStock is number && data.minStock >= 0 &&
+        data.isActive is bool &&
+        isValidId(data.createdByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPriceHistory(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'productId', 'productName', 'baseUnit', 'changeType', 'costPriceBefore', 'costPriceAfter', 'sellPriceBefore', 'sellPriceAfter', 'summary', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'productId', 'productName', 'baseUnit', 'changeType', 'costPriceBefore', 'costPriceAfter', 'sellPriceBefore', 'sellPriceAfter', 'wholesalePriceBefore', 'wholesalePriceAfter', 'summary', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120 &&
+        data.baseUnit is string && data.baseUnit.size() >= 1 && data.baseUnit.size() <= 24 &&
+        data.changeType in ['initial', 'update'] &&
+        data.costPriceBefore is number && data.costPriceBefore >= 0 &&
+        data.costPriceAfter is number && data.costPriceAfter >= 0 &&
+        data.sellPriceBefore is number && data.sellPriceBefore >= 0 &&
+        data.sellPriceAfter is number && data.sellPriceAfter >= 0 &&
+        (!('wholesalePriceBefore' in data) || (data.wholesalePriceBefore is number && data.wholesalePriceBefore >= 0)) &&
+        (!('wholesalePriceAfter' in data) || (data.wholesalePriceAfter is number && data.wholesalePriceAfter >= 0)) &&
+        data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 300 &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidStockMovement(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'productId', 'productName', 'type', 'quantity', 'stockBefore', 'stockAfter', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'productId', 'productName', 'baseUnit', 'unitName', 'unitQuantity', 'conversion', 'type', 'quantity', 'stockBefore', 'stockAfter', 'referenceId', 'notes', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120 &&
+        isOptString(data, 'baseUnit', 24) &&
+        isOptString(data, 'unitName', 24) &&
+        (!('unitQuantity' in data) || (data.unitQuantity is number && data.unitQuantity >= 0)) &&
+        (!('conversion' in data) || (data.conversion is number && data.conversion > 0)) &&
+        data.type in ['in', 'out', 'adjustment'] &&
+        data.quantity is number &&
+        data.stockBefore is number &&
+        data.stockAfter is number &&
+        isOptString(data, 'referenceId', 128) &&
+        isOptString(data, 'notes', 240) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidSale(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'totalItems', 'subtotal', 'discount', 'totalAmount', 'paidAmount', 'changeAmount', 'debtAmount', 'paymentMethod', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'totalItems', 'subtotal', 'discount', 'totalAmount', 'totalCost', 'totalProfit', 'paidAmount', 'changeAmount', 'debtAmount', 'paymentMethod', 'cashPaidPart', 'qrisAmount', 'qrisFeeRate', 'qrisFeeAmount', 'netReceivedAmount', 'accountId', 'qrisAccountId', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isOptString(data, 'customerId', 128) &&
+        isOptString(data, 'customerName', 100) &&
+        data.totalItems is number && data.totalItems > 0 &&
+        data.subtotal is number && data.subtotal >= 0 &&
+        data.discount is number && data.discount >= 0 &&
+        data.totalAmount is number && data.totalAmount >= 0 &&
+        (!('totalCost' in data) || (data.totalCost is number && data.totalCost >= 0)) &&
+        (!('totalProfit' in data) || data.totalProfit is number) &&
+        data.paidAmount is number && data.paidAmount >= 0 &&
+        data.changeAmount is number && data.changeAmount >= 0 &&
+        data.debtAmount is number && data.debtAmount >= 0 &&
+        data.paymentMethod in ['cash', 'transfer', 'qris', 'mixed', 'debt'] &&
+        (!('cashPaidPart' in data) || (data.cashPaidPart is number && data.cashPaidPart >= 0)) &&
+        (!('qrisAmount' in data) || (data.qrisAmount is number && data.qrisAmount >= 0)) &&
+        (!('qrisFeeRate' in data) || (data.qrisFeeRate is number && data.qrisFeeRate >= 0 && data.qrisFeeRate <= 10)) &&
+        (!('qrisFeeAmount' in data) || (data.qrisFeeAmount is number && data.qrisFeeAmount >= 0)) &&
+        (!('netReceivedAmount' in data) || (data.netReceivedAmount is number && data.netReceivedAmount >= 0)) &&
+        isOptString(data, 'accountId', 128) &&
+        isOptString(data, 'qrisAccountId', 128) &&
+        data.status in ['completed', 'void'] &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSaleItem(data) {
+      return data.keys().hasAll(['saleId', 'productId', 'productName', 'quantity', 'costPrice', 'unitPrice', 'subtotal', 'recordedByUid', 'createdAt']) &&
+        data.keys().hasOnly(['saleId', 'productId', 'productName', 'unitName', 'conversion', 'baseQuantity', 'priceTier', 'quantity', 'costPrice', 'unitPrice', 'subtotal', 'profit', 'recordedByUid', 'createdAt']) &&
+        isValidId(data.saleId) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120 &&
+        isOptString(data, 'unitName', 24) &&
+        (!('conversion' in data) || (data.conversion is number && data.conversion > 0)) &&
+        (!('baseQuantity' in data) || (data.baseQuantity is number && data.baseQuantity > 0)) &&
+        (!('priceTier' in data) || data.priceTier in ['retail', 'wholesale']) &&
+        data.quantity is number && data.quantity > 0 &&
+        data.costPrice is number && data.costPrice >= 0 &&
+        data.unitPrice is number && data.unitPrice >= 0 &&
+        data.subtotal is number && data.subtotal >= 0 &&
+        (!('profit' in data) || data.profit is number) &&
+        isValidId(data.recordedByUid) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidPurchase(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'supplierName', 'totalAmount', 'paymentMethod', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'invoiceNumber', 'supplierId', 'supplierName', 'subtotal', 'discount', 'extraCost', 'totalAmount', 'paidAmount', 'debtAmount', 'returnedAmount', 'paymentMethod', 'paymentStatus', 'accountId', 'accountName', 'notes', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isOptString(data, 'invoiceNumber', 60) &&
+        isOptString(data, 'supplierId', 128) &&
+        data.supplierName is string && data.supplierName.size() >= 1 && data.supplierName.size() <= 120 &&
+        (!('subtotal' in data) || (data.subtotal is number && data.subtotal >= 0)) &&
+        (!('discount' in data) || (data.discount is number && data.discount >= 0)) &&
+        (!('extraCost' in data) || (data.extraCost is number && data.extraCost >= 0)) &&
+        data.totalAmount is number && data.totalAmount >= 0 &&
+        (!('paidAmount' in data) || (data.paidAmount is number && data.paidAmount >= 0)) &&
+        (!('debtAmount' in data) || (data.debtAmount is number && data.debtAmount >= 0)) &&
+        (!('returnedAmount' in data) || (data.returnedAmount is number && data.returnedAmount >= 0)) &&
+        data.paymentMethod in ['cash', 'transfer', 'credit', 'partial'] &&
+        (!('paymentStatus' in data) || data.paymentStatus in ['paid', 'partial', 'unpaid']) &&
+        isOptString(data, 'accountId', 128) &&
+        isOptString(data, 'accountName', 80) &&
+        isOptString(data, 'notes', 240) &&
+        data.status in ['completed', 'void'] &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPurchaseItem(data) {
+      return data.keys().hasAll(['purchaseId', 'productId', 'productName', 'quantity', 'unitCost', 'subtotal', 'recordedByUid', 'createdAt']) &&
+        data.keys().hasOnly(['purchaseId', 'productId', 'productName', 'unitName', 'baseUnit', 'conversion', 'baseQuantity', 'quantity', 'unitCost', 'lineDiscount', 'allocatedExtraCost', 'netLineTotal', 'effectiveBaseUnitCost', 'hppBefore', 'hppAfter', 'subtotal', 'recordedByUid', 'createdAt']) &&
+        isValidId(data.purchaseId) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120 &&
+        isOptString(data, 'unitName', 24) &&
+        isOptString(data, 'baseUnit', 24) &&
+        (!('conversion' in data) || (data.conversion is number && data.conversion > 0)) &&
+        (!('baseQuantity' in data) || (data.baseQuantity is number && data.baseQuantity > 0)) &&
+        data.quantity is number && data.quantity > 0 &&
+        data.unitCost is number && data.unitCost >= 0 &&
+        (!('lineDiscount' in data) || (data.lineDiscount is number && data.lineDiscount >= 0)) &&
+        (!('allocatedExtraCost' in data) || data.allocatedExtraCost is number) &&
+        (!('netLineTotal' in data) || (data.netLineTotal is number && data.netLineTotal >= 0)) &&
+        (!('effectiveBaseUnitCost' in data) || (data.effectiveBaseUnitCost is number && data.effectiveBaseUnitCost >= 0)) &&
+        (!('hppBefore' in data) || (data.hppBefore is number && data.hppBefore >= 0)) &&
+        (!('hppAfter' in data) || (data.hppAfter is number && data.hppAfter >= 0)) &&
+        data.subtotal is number && data.subtotal >= 0 &&
+        isValidId(data.recordedByUid) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidSupplier(data) {
+      return data.keys().hasAll(['name', 'totalDebt', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'phone', 'address', 'notes', 'totalDebt', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        isOptString(data, 'phone', 24) &&
+        isOptString(data, 'address', 200) &&
+        isOptString(data, 'notes', 200) &&
+        data.totalDebt is number && data.totalDebt >= 0 &&
+        isValidId(data.createdByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSupplierPayment(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'purchaseId', 'purchaseNumber', 'supplierName', 'amount', 'debtBefore', 'debtAfter', 'accountId', 'accountName', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'purchaseId', 'purchaseNumber', 'invoiceNumber', 'supplierId', 'supplierName', 'amount', 'debtBefore', 'debtAfter', 'accountId', 'accountName', 'notes', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isValidId(data.purchaseId) &&
+        isValidTrxNum(data.purchaseNumber) &&
+        isOptString(data, 'invoiceNumber', 60) &&
+        isOptString(data, 'supplierId', 128) &&
+        data.supplierName is string && data.supplierName.size() >= 1 && data.supplierName.size() <= 120 &&
+        data.amount is number && data.amount > 0 &&
+        data.debtBefore is number && data.debtBefore >= 0 &&
+        data.debtAfter is number && data.debtAfter >= 0 &&
+        isValidId(data.accountId) &&
+        data.accountName is string && data.accountName.size() >= 1 && data.accountName.size() <= 80 &&
+        isOptString(data, 'notes', 240) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidPurchaseReturn(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'purchaseId', 'purchaseNumber', 'supplierName', 'productId', 'productName', 'unitName', 'baseUnit', 'conversion', 'returnQty', 'returnBaseQty', 'unitRefundPrice', 'refundTotal', 'settlementType', 'debtReducedAmount', 'cashRefundAmount', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'purchaseId', 'purchaseNumber', 'supplierId', 'supplierName', 'productId', 'productName', 'unitName', 'baseUnit', 'conversion', 'returnQty', 'returnBaseQty', 'unitRefundPrice', 'refundTotal', 'settlementType', 'debtReducedAmount', 'cashRefundAmount', 'accountId', 'accountName', 'reason', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isValidId(data.purchaseId) &&
+        isValidTrxNum(data.purchaseNumber) &&
+        isOptString(data, 'supplierId', 128) &&
+        data.supplierName is string && data.supplierName.size() >= 1 && data.supplierName.size() <= 120 &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120 &&
+        data.unitName is string && data.unitName.size() >= 1 && data.unitName.size() <= 24 &&
+        data.baseUnit is string && data.baseUnit.size() >= 1 && data.baseUnit.size() <= 24 &&
+        data.conversion is number && data.conversion > 0 &&
+        data.returnQty is number && data.returnQty > 0 &&
+        data.returnBaseQty is number && data.returnBaseQty > 0 &&
+        data.unitRefundPrice is number && data.unitRefundPrice >= 0 &&
+        data.refundTotal is number && data.refundTotal >= 0 &&
+        data.settlementType in ['reduce_debt', 'cash_refund', 'mixed'] &&
+        data.debtReducedAmount is number && data.debtReducedAmount >= 0 &&
+        data.cashRefundAmount is number && data.cashRefundAmount >= 0 &&
+        isOptString(data, 'accountId', 128) &&
+        isOptString(data, 'accountName', 80) &&
+        isOptString(data, 'reason', 240) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidCustomer(data) {
+      return data.keys().hasAll(['name', 'totalDebt', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'phone', 'address', 'totalDebt', 'notes', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        isOptString(data, 'phone', 24) &&
+        isOptString(data, 'address', 200) &&
+        data.totalDebt is number && data.totalDebt >= 0 &&
+        isOptString(data, 'notes', 200) &&
+        isValidId(data.createdByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReceivable(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'type', 'amount', 'balanceAfter', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'type', 'amount', 'balanceAfter', 'saleId', 'accountId', 'notes', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isValidId(data.customerId) &&
+        data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 100 &&
+        data.type in ['debt', 'payment'] &&
+        data.amount is number && data.amount > 0 &&
+        data.balanceAfter is number && data.balanceAfter >= 0 &&
+        isOptString(data, 'saleId', 128) &&
+        isOptString(data, 'accountId', 128) &&
+        isOptString(data, 'notes', 240) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidLoan(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'borrowerName', 'loanDate', 'dueDate', 'principalAmount', 'paidAmount', 'remainingAmount', 'sourceAccountId', 'sourceAccountName', 'sourceAccountType', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'borrowerName', 'borrowerPhone', 'loanDate', 'dueDate', 'principalAmount', 'paidAmount', 'remainingAmount', 'sourceAccountId', 'sourceAccountName', 'sourceAccountType', 'status', 'notes', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        data.borrowerName is string && data.borrowerName.size() >= 1 && data.borrowerName.size() <= 100 &&
+        isOptString(data, 'borrowerPhone', 24) &&
+        isValidDateStr(data.loanDate) &&
+        isValidDateStr(data.dueDate) &&
+        data.principalAmount is number && data.principalAmount > 0 &&
+        data.paidAmount is number && data.paidAmount >= 0 &&
+        data.remainingAmount is number && data.remainingAmount >= 0 &&
+        isValidId(data.sourceAccountId) &&
+        data.sourceAccountName is string && data.sourceAccountName.size() >= 1 && data.sourceAccountName.size() <= 80 &&
+        data.sourceAccountType in ['cash', 'bank', 'ewallet', 'ppob_deposit'] &&
+        data.status in ['unpaid', 'partial', 'paid'] &&
+        isOptString(data, 'notes', 240) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLoanPayment(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'loanId', 'loanNumber', 'borrowerName', 'amount', 'remainingBefore', 'remainingAfter', 'accountId', 'accountName', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'loanId', 'loanNumber', 'borrowerName', 'amount', 'remainingBefore', 'remainingAfter', 'accountId', 'accountName', 'notes', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isValidId(data.loanId) &&
+        isValidTrxNum(data.loanNumber) &&
+        data.borrowerName is string && data.borrowerName.size() >= 1 && data.borrowerName.size() <= 100 &&
+        data.amount is number && data.amount > 0 &&
+        data.remainingBefore is number && data.remainingBefore >= 0 &&
+        data.remainingAfter is number && data.remainingAfter >= 0 &&
+        isValidId(data.accountId) &&
+        data.accountName is string && data.accountName.size() >= 1 && data.accountName.size() <= 80 &&
+        isOptString(data, 'notes', 240) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidMiniAtmFeeTier(t) {
+      return t is map &&
+        t.keys().hasAll(['id', 'serviceScope', 'minAmount', 'maxAmount', 'adminFee']) &&
+        t.keys().hasOnly(['id', 'serviceScope', 'minAmount', 'maxAmount', 'adminFee', 'bankFee']) &&
+        t.id is string && t.id.size() >= 1 && t.id.size() <= 64 &&
+        t.serviceScope in ['all', 'tarik_tunai', 'transfer'] &&
+        t.minAmount is number && t.minAmount >= 0 &&
+        t.maxAmount is number && t.maxAmount >= 0 &&
+        t.adminFee is number && t.adminFee >= 0 &&
+        (!('bankFee' in t) || (t.bankFee is number && t.bankFee >= 0));
+    }
+
+    function isValidMiniAtmBankRule(r) {
+      return r is map &&
+        r.keys().hasAll(['bankName', 'defaultBankFee']) &&
+        r.keys().hasOnly(['bankName', 'defaultBankFee']) &&
+        r.bankName is string && r.bankName.size() >= 1 && r.bankName.size() <= 60 &&
+        r.defaultBankFee is number && r.defaultBankFee >= 0;
+    }
+
+    function isValidMiniAtmSetting(data) {
+      return data.keys().hasAll(['allowQrisTarikTunai', 'qrisMdrPercent', 'qrisInternalExtraThreshold', 'qrisInternalExtraFee', 'defaultTarikTunaiFee', 'defaultTransferFee', 'feeTiers', 'bankFeeRules', 'updatedByUid', 'updatedAt']) &&
+        data.keys().hasOnly(['allowQrisTarikTunai', 'qrisProviderNote', 'qrisMdrPercent', 'qrisInternalExtraThreshold', 'qrisInternalExtraFee', 'defaultTarikTunaiFee', 'defaultTransferFee', 'feeTiers', 'bankFeeRules', 'updatedByUid', 'updatedByName', 'updatedAt']) &&
+        data.allowQrisTarikTunai is bool &&
+        isOptString(data, 'qrisProviderNote', 200) &&
+        data.qrisMdrPercent is number && data.qrisMdrPercent >= 0 && data.qrisMdrPercent <= 10 &&
+        data.qrisInternalExtraThreshold is number && data.qrisInternalExtraThreshold >= 0 &&
+        data.qrisInternalExtraFee is number && data.qrisInternalExtraFee >= 0 &&
+        data.defaultTarikTunaiFee is number && data.defaultTarikTunaiFee >= 0 &&
+        data.defaultTransferFee is number && data.defaultTransferFee >= 0 &&
+        data.feeTiers is list && data.feeTiers.size() <= 30 &&
+        (data.feeTiers.size() == 0 || isValidMiniAtmFeeTier(data.feeTiers[0])) &&
+        data.bankFeeRules is list && data.bankFeeRules.size() <= 40 &&
+        (data.bankFeeRules.size() == 0 || isValidMiniAtmBankRule(data.bankFeeRules[0])) &&
+        isValidId(data.updatedByUid) &&
+        isOptString(data, 'updatedByName', 100) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidMiniAtmFeeAudit(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'miniAtmTxId', 'serviceType', 'bankName', 'principalAmount', 'standardAdminFee', 'appliedAdminFee', 'standardBankFee', 'appliedBankFee', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'miniAtmTxId', 'serviceType', 'bankName', 'principalAmount', 'standardAdminFee', 'appliedAdminFee', 'standardBankFee', 'appliedBankFee', 'reason', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isValidId(data.miniAtmTxId) &&
+        data.serviceType in ['tarik_tunai', 'transfer', 'setor_tunai'] &&
+        data.bankName is string && data.bankName.size() >= 1 && data.bankName.size() <= 60 &&
+        data.principalAmount is number && data.principalAmount > 0 &&
+        data.standardAdminFee is number && data.standardAdminFee >= 0 &&
+        data.appliedAdminFee is number && data.appliedAdminFee >= 0 &&
+        data.standardBankFee is number && data.standardBankFee >= 0 &&
+        data.appliedBankFee is number && data.appliedBankFee >= 0 &&
+        isOptString(data, 'reason', 200) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidMiniAtm(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'serviceType', 'bankName', 'principalAmount', 'adminFee', 'bankFee', 'netProfit', 'cashAccountId', 'bankAccountId', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'serviceType', 'paymentChannel', 'bankName', 'targetAccountNumber', 'customerName', 'principalAmount', 'adminFee', 'bankFee', 'qrisVerified', 'transferVerified', 'qrisMdrRate', 'qrisMdrAmount', 'internalExtraFee', 'externalReferenceNumber', 'transferProofDataUrl', 'standardAdminFee', 'standardBankFee', 'feeOverridden', 'feeOverrideReason', 'netProfit', 'cashAccountId', 'bankAccountId', 'notes', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        data.serviceType in ['tarik_tunai', 'transfer', 'setor_tunai'] &&
+        (!('paymentChannel' in data) || data.paymentChannel in ['bank_transfer', 'qris']) &&
+        data.bankName is string && data.bankName.size() >= 1 && data.bankName.size() <= 60 &&
+        isOptString(data, 'targetAccountNumber', 40) &&
+        isOptString(data, 'customerName', 100) &&
+        data.principalAmount is number && data.principalAmount > 0 &&
+        data.adminFee is number && data.adminFee >= 0 &&
+        data.bankFee is number && data.bankFee >= 0 &&
+        (!('qrisVerified' in data) || data.qrisVerified is bool) &&
+        (!('transferVerified' in data) || data.transferVerified is bool) &&
+        (!('qrisMdrRate' in data) || (data.qrisMdrRate is number && data.qrisMdrRate >= 0 && data.qrisMdrRate <= 10)) &&
+        (!('qrisMdrAmount' in data) || (data.qrisMdrAmount is number && data.qrisMdrAmount >= 0)) &&
+        (!('internalExtraFee' in data) || (data.internalExtraFee is number && data.internalExtraFee >= 0)) &&
+        isOptString(data, 'externalReferenceNumber', 80) &&
+        isOptString(data, 'transferProofDataUrl', 80000) &&
+        (!('standardAdminFee' in data) || (data.standardAdminFee is number && data.standardAdminFee >= 0)) &&
+        (!('standardBankFee' in data) || (data.standardBankFee is number && data.standardBankFee >= 0)) &&
+        (!('feeOverridden' in data) || data.feeOverridden is bool) &&
+        isOptString(data, 'feeOverrideReason', 200) &&
+        (!('paymentChannel' in data) || data.paymentChannel != 'qris' || (data.serviceType == 'tarik_tunai' && ('qrisVerified' in data) && data.qrisVerified == true)) &&
+        data.netProfit is number &&
+        isValidId(data.cashAccountId) &&
+        isValidId(data.bankAccountId) &&
+        isOptString(data, 'notes', 240) &&
+        data.status in ['completed', 'void'] &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPpob(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'category', 'providerName', 'targetNumber', 'capitalPrice', 'sellPrice', 'adminFee', 'netProfit', 'accountId', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'category', 'providerName', 'targetNumber', 'customerName', 'capitalPrice', 'sellPrice', 'adminFee', 'netProfit', 'accountId', 'cashAccountId', 'serialNumber', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        data.category in ['pulsa', 'paket_data', 'pln', 'pdam', 'bpjs', 'ewallet', 'lainnya'] &&
+        data.providerName is string && data.providerName.size() >= 1 && data.providerName.size() <= 80 &&
+        data.targetNumber is string && data.targetNumber.size() >= 3 && data.targetNumber.size() <= 50 &&
+        isOptString(data, 'customerName', 100) &&
+        data.capitalPrice is number && data.capitalPrice >= 0 &&
+        data.sellPrice is number && data.sellPrice >= 0 &&
+        data.adminFee is number && data.adminFee >= 0 &&
+        data.netProfit is number &&
+        isValidId(data.accountId) &&
+        isOptString(data, 'cashAccountId', 128) &&
+        isOptString(data, 'serialNumber', 100) &&
+        data.status in ['completed', 'pending', 'failed'] &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAccount(data) {
+      return data.keys().hasAll(['name', 'type', 'balance', 'isActive', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'type', 'accountNumber', 'balance', 'isActive', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.type in ['cash', 'bank', 'ewallet', 'ppob_deposit'] &&
+        isOptString(data, 'accountNumber', 40) &&
+        data.balance is number &&
+        data.isActive is bool &&
+        isValidId(data.updatedByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCashLedger(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'accountId', 'accountName', 'direction', 'amount', 'balanceBefore', 'balanceAfter', 'sourceModule', 'description', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'accountId', 'accountName', 'direction', 'amount', 'balanceBefore', 'balanceAfter', 'sourceModule', 'referenceId', 'description', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isValidId(data.accountId) &&
+        data.accountName is string && data.accountName.size() >= 1 && data.accountName.size() <= 80 &&
+        data.direction in ['in', 'out'] &&
+        data.amount is number && data.amount > 0 &&
+        data.balanceBefore is number &&
+        data.balanceAfter is number &&
+        data.sourceModule in ['sale', 'purchase', 'mini_atm', 'ppob', 'expense', 'receivable', 'capital', 'transfer', 'loan'] &&
+        isOptString(data, 'referenceId', 128) &&
+        data.description is string && data.description.size() >= 1 && data.description.size() <= 240 &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidExpense(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'category', 'description', 'amount', 'accountId', 'accountName', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'category', 'description', 'amount', 'accountId', 'accountName', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
+        data.description is string && data.description.size() >= 1 && data.description.size() <= 240 &&
+        data.amount is number && data.amount > 0 &&
+        isValidId(data.accountId) &&
+        data.accountName is string && data.accountName.size() >= 1 && data.accountName.size() <= 80 &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidFinancialSummary(data) {
+      return data.keys().hasAll(['periodType', 'periodKey', 'totalSales', 'totalPurchases', 'totalMiniAtmVolume', 'totalMiniAtmProfit', 'totalPpobVolume', 'totalPpobProfit', 'totalExpenses', 'netProfit', 'updatedByUid', 'updatedAt']) &&
+        data.keys().hasOnly(['periodType', 'periodKey', 'totalSales', 'totalPurchases', 'totalMiniAtmVolume', 'totalMiniAtmProfit', 'totalPpobVolume', 'totalPpobProfit', 'totalExpenses', 'netProfit', 'updatedByUid', 'updatedAt']) &&
+        data.periodType in ['daily', 'monthly'] &&
+        data.periodKey is string && data.periodKey.size() >= 4 && data.periodKey.size() <= 20 &&
+        data.totalSales is number &&
+        data.totalPurchases is number &&
+        data.totalMiniAtmVolume is number &&
+        data.totalMiniAtmProfit is number &&
+        data.totalPpobVolume is number &&
+        data.totalPpobProfit is number &&
+        data.totalExpenses is number &&
+        data.netProfit is number &&
+        isValidId(data.updatedByUid) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidResetLog(data) {
+      return data.keys().hasAll(['resetType', 'resetLabel', 'itemsDeletedCount', 'details', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['resetType', 'resetLabel', 'itemsDeletedCount', 'details', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.resetType is string && data.resetType.size() >= 1 && data.resetType.size() <= 60 &&
+        data.resetLabel is string && data.resetLabel.size() >= 1 && data.resetLabel.size() <= 120 &&
+        data.itemsDeletedCount is number && data.itemsDeletedCount >= 0 &&
+        data.details is string && data.details.size() <= 1000 &&
+      isValidId(data.recordedByUid) &&
+      data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+      data.createdAt is timestamp;
+    }
+
+    function isValidStockOpname(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'title', 'status', 'startedAtMs', 'totalProducts', 'countedProducts', 'matchedCount', 'surplusCount', 'deficitCount', 'totalVarianceValue', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'title', 'categoryFilterId', 'categoryFilterName', 'status', 'startedAtMs', 'lastSavedAt', 'finalizedAt', 'finalizedByUid', 'finalizedByName', 'finalizedDate', 'finalizedTime', 'totalProducts', 'countedProducts', 'matchedCount', 'surplusCount', 'deficitCount', 'totalVarianceValue', 'notes', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+        isOptString(data, 'categoryFilterId', 128) &&
+        isOptString(data, 'categoryFilterName', 60) &&
+        data.status in ['draft', 'finalized'] &&
+        data.startedAtMs is number && data.startedAtMs > 0 &&
+        (!('lastSavedAt' in data) || data.lastSavedAt is timestamp) &&
+        (!('finalizedAt' in data) || data.finalizedAt is timestamp) &&
+        (!('finalizedByUid' in data) || isValidId(data.finalizedByUid)) &&
+        isOptString(data, 'finalizedByName', 100) &&
+        (!('finalizedDate' in data) || isValidDateStr(data.finalizedDate)) &&
+        (!('finalizedTime' in data) || isValidTimeStr(data.finalizedTime)) &&
+        data.totalProducts is number && data.totalProducts >= 0 &&
+        data.countedProducts is number && data.countedProducts >= 0 &&
+        data.matchedCount is number && data.matchedCount >= 0 &&
+        data.surplusCount is number && data.surplusCount >= 0 &&
+        data.deficitCount is number && data.deficitCount >= 0 &&
+        data.totalVarianceValue is number &&
+        isOptString(data, 'notes', 300) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStockOpnameItem(data) {
+      return data.keys().hasAll(['opnameId', 'productId', 'sku', 'productName', 'categoryId', 'categoryName', 'baseUnit', 'costPrice', 'systemStockAtStart', 'systemStockAtCount', 'movementSinceStart', 'physicalUnitName', 'physicalUnitQty', 'varianceBase', 'varianceStatus', 'isCounted', 'recordedByUid', 'updatedAt']) &&
+        data.keys().hasOnly(['opnameId', 'productId', 'sku', 'barcode', 'productName', 'categoryId', 'categoryName', 'baseUnit', 'costPrice', 'systemStockAtStart', 'systemStockAtCount', 'movementSinceStart', 'physicalUnitName', 'physicalUnitQty', 'physicalSubUnitName', 'physicalSubUnitQty', 'physicalStockBase', 'varianceBase', 'varianceStatus', 'finalStockApplied', 'reason', 'isCounted', 'countedAtMs', 'recordedByUid', 'updatedAt']) &&
+        isValidId(data.opnameId) &&
+        isValidId(data.productId) &&
+        data.sku is string && data.sku.size() >= 1 && data.sku.size() <= 40 &&
+        isOptString(data, 'barcode', 64) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120 &&
+        isValidId(data.categoryId) &&
+        data.categoryName is string && data.categoryName.size() >= 1 && data.categoryName.size() <= 60 &&
+        data.baseUnit is string && data.baseUnit.size() >= 1 && data.baseUnit.size() <= 24 &&
+        data.costPrice is number && data.costPrice >= 0 &&
+        data.systemStockAtStart is number && data.systemStockAtStart >= 0 &&
+        data.systemStockAtCount is number && data.systemStockAtCount >= 0 &&
+        data.movementSinceStart is number &&
+        data.physicalUnitName is string && data.physicalUnitName.size() >= 1 && data.physicalUnitName.size() <= 24 &&
+        data.physicalUnitQty is number && data.physicalUnitQty >= 0 &&
+        isOptString(data, 'physicalSubUnitName', 24) &&
+        (!('physicalSubUnitQty' in data) || (data.physicalSubUnitQty is number && data.physicalSubUnitQty >= 0)) &&
+        (!('physicalStockBase' in data) || (data.physicalStockBase is number && data.physicalStockBase >= 0)) &&
+        data.varianceBase is number &&
+        data.varianceStatus in ['uncounted', 'match', 'surplus', 'deficit'] &&
+        (!('finalStockApplied' in data) || (data.finalStockApplied is number && data.finalStockApplied >= 0)) &&
+        isOptString(data, 'reason', 240) &&
+        data.isCounted is bool &&
+        (!('countedAtMs' in data) || (data.countedAtMs is number && data.countedAtMs > 0)) &&
+        isValidId(data.recordedByUid) &&
+        data.updatedAt is timestamp;
+    }
+
+    // 4. Collection Rules
+
+    // System Bootstrap Lock (Admin Utama Pertama)
+    match /system_config/{configId} {
+      allow get: if isVerified() && configId == 'bootstrap';
+      allow list: if false;
+      allow create: if isVerified() && configId == 'bootstrap' &&
+        !bootstrapExists() &&
+        isValidBootstrapConfig(incoming()) &&
+        incoming().primaryAdminUid == request.auth.uid &&
+        incoming().claimedAt == request.time &&
+        existsAfter(userDocPath(request.auth.uid)) &&
+        getAfter(userDocPath(request.auth.uid)).data.role == 'admin' &&
+        getAfter(userDocPath(request.auth.uid)).data.status == 'active';
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // Users & RBAC
+    match /users/{userId} {
+      allow get: if isVerified() && isValidId(userId) && (userId == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (isPrimaryAdmin() || (!bootstrapExists() && isBootstrapAdmin()) || resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isVerified() && isValidId(userId) && isValidUserProfile(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          (userId == request.auth.uid &&
+            !bootstrapExists() &&
+            incoming().email == request.auth.token.email &&
+            incoming().role == 'admin' &&
+            incoming().status == 'active' &&
+            existsAfter(bootstrapPath()) &&
+            getAfter(bootstrapPath()).data.primaryAdminUid == request.auth.uid) ||
+          (userId == request.auth.uid && isValidInviteClaim(incoming())) ||
+          (userId == request.auth.uid &&
+            incoming().email == request.auth.token.email &&
+            incoming().role == 'pending' &&
+            incoming().status == 'pending' &&
+            !('claimedInviteId' in incoming()) &&
+            !('isPrimaryAdmin' in incoming())) ||
+          isAdmin()
+        );
+      allow update: if isVerified() && isValidId(userId) && isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().email == existing().email &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (isAdmin() && (
+            !bootstrapExists() ||
+            get(bootstrapPath()).data.primaryAdminUid != userId ||
+            (incoming().role == 'admin' && incoming().status == 'active')
+          )) ||
+          (userId == request.auth.uid &&
+            existing().role == 'pending' &&
+            !bootstrapExists() &&
+            incoming().role == 'admin' &&
+            incoming().status == 'active' &&
+            existsAfter(bootstrapPath()) &&
+            getAfter(bootstrapPath()).data.primaryAdminUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'isPrimaryAdmin', 'shiftLabel', 'updatedAt'])) ||
+          (userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'phone', 'updatedAt'])) ||
+          (userId == request.auth.uid && existing().role == 'pending' && isValidInviteClaim(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'shiftLabel', 'claimedInviteId', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid &&
+        (!bootstrapExists() || get(bootstrapPath()).data.primaryAdminUid != userId);
+    }
+
+    // Staff Invites
+    match /staff_invites/{inviteId} {
+      allow get: if isVerified() && isValidId(inviteId) && (isAdmin() || resource.data.email == request.auth.token.email);
+      allow list: if isVerified() && (isAdmin() || resource.data.email == request.auth.token.email);
+      allow create: if isAdmin() && isValidId(inviteId) && isValidStaffInvite(incoming()) &&
+        incoming().invitedByUid == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() && isValidId(inviteId) && isValidStaffInvite(incoming()) &&
+        incoming().invitedByUid == existing().invitedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().email == request.auth.token.email && existing().status == 'pending' && incoming().status == 'claimed' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(inviteId);
+    }
+
+    // Store Settings
+    match /store_settings/{settingId} {
+      allow get: if isActiveStaff() && isValidId(settingId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(settingId) && isValidStoreSetting(incoming()) &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(settingId) && isValidStoreSetting(incoming()) &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Categories
+    match /categories/{categoryId} {
+      allow get: if isActiveStaff() && isValidId(categoryId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(categoryId) && isValidCategory(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(categoryId) && isValidCategory(incoming()) &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(categoryId);
+    }
+
+    // Products
+    match /products/{productId} {
+      allow get: if isActiveStaff() && isValidId(productId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(productId) && isValidProduct(incoming()) &&
+        incoming().stock >= 0 &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        existsAfter(/databases/$(database)/documents/categories/$(incoming().categoryId));
+      allow update: if isActiveStaff() && isValidId(productId) && isValidProduct(incoming()) &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (isAdmin() && (incoming().stock >= 0 || incoming().stock == existing().stock)) ||
+          (incoming().stock >= 0 && incoming().stock <= existing().stock && incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(productId);
+    }
+
+    // Price History
+    match /price_history/{historyId} {
+      allow get: if isActiveStaff() && isValidId(historyId);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isAdmin() && isValidId(historyId) && isValidPriceHistory(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(historyId);
+    }
+
+    // Stock Movements
+    match /stock_movements/{movementId} {
+      allow get: if isActiveStaff() && isValidId(movementId);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(movementId) && isValidStockMovement(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/products/$(incoming().productId)) && (
+          isAdmin() ||
+          incoming().type == 'out'
+        );
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(movementId);
+    }
+
+    // Sales & Items
+    match /sales/{saleId} {
+      allow get: if isActiveStaff() && isValidId(saleId);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(saleId) && isValidSale(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isActiveStaff() && isValidId(saleId) && isValidSale(incoming()) &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status != 'void' && (
+          isAdmin() ||
+          (existing().recordedByUid == request.auth.uid && incoming().status == 'void' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(saleId);
+
+      match /items/{itemId} {
+        allow get: if isActiveStaff() && isValidId(saleId) && isValidId(itemId);
+        allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+        allow create: if isActiveStaff() && isValidId(saleId) && isValidId(itemId) && isValidSaleItem(incoming()) &&
+          incoming().saleId == saleId &&
+          incoming().recordedByUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          existsAfter(/databases/$(database)/documents/sales/$(saleId)) &&
+          existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+        allow update: if false;
+        allow delete: if isAdmin() && isValidId(saleId) && isValidId(itemId);
+      }
+    }
+
+    // Suppliers (Admin Only)
+    match /suppliers/{supplierId} {
+      allow get: if isAdmin() && isValidId(supplierId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(supplierId) && isValidSupplier(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(supplierId) && isValidSupplier(incoming()) &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(supplierId);
+    }
+
+    // Purchases & Items (Admin Only)
+    match /purchases/{purchaseId} {
+      allow get: if isAdmin() && isValidId(purchaseId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(purchaseId) && isValidPurchase(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(purchaseId) && isValidPurchase(incoming()) &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status != 'void';
+      allow delete: if isAdmin() && isValidId(purchaseId);
+
+      match /items/{itemId} {
+        allow get: if isAdmin() && isValidId(purchaseId) && isValidId(itemId);
+        allow list: if isAdmin();
+        allow create: if isAdmin() && isValidId(purchaseId) && isValidId(itemId) && isValidPurchaseItem(incoming()) &&
+          incoming().purchaseId == purchaseId &&
+          incoming().recordedByUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          existsAfter(/databases/$(database)/documents/purchases/$(purchaseId)) &&
+          existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+        allow update: if false;
+        allow delete: if isAdmin() && isValidId(purchaseId) && isValidId(itemId);
+      }
+    }
+
+    // Supplier Debt Payments (Admin Only)
+    match /supplier_payments/{paymentId} {
+      allow get: if isAdmin() && isValidId(paymentId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(paymentId) && isValidSupplierPayment(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().debtAfter <= incoming().debtBefore &&
+        exists(/databases/$(database)/documents/purchases/$(incoming().purchaseId)) &&
+        exists(/databases/$(database)/documents/accounts/$(incoming().accountId));
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(paymentId);
+    }
+
+    // Purchase Returns (Admin Only)
+    match /purchase_returns/{returnId} {
+      allow get: if isAdmin() && isValidId(returnId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(returnId) && isValidPurchaseReturn(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/purchases/$(incoming().purchaseId)) &&
+        exists(/databases/$(database)/documents/products/$(incoming().productId));
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(returnId);
+    }
+
+    // Customers
+    match /customers/{customerId} {
+      allow get: if isActiveStaff() && isValidId(customerId);
+      allow list: if isActiveStaff();
+      allow create: if isActiveStaff() && isValidId(customerId) && isValidCustomer(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isActiveStaff() && isValidId(customerId) && isValidCustomer(incoming()) &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['totalDebt', 'updatedAt'])
+        );
+      allow delete: if isAdmin() && isValidId(customerId);
+    }
+
+    // Receivables
+    match /receivables/{receivableId} {
+      allow get: if isActiveStaff() && isValidId(receivableId);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(receivableId) && isValidReceivable(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/customers/$(incoming().customerId));
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(receivableId);
+    }
+
+    // Loans & Loan Payments (Admin Only)
+    match /loans/{loanId} {
+      allow get: if isAdmin() && isValidId(loanId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(loanId) && isValidLoan(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        incoming().paidAmount == 0 &&
+        incoming().remainingAmount == incoming().principalAmount &&
+        incoming().status == 'unpaid' &&
+        exists(/databases/$(database)/documents/accounts/$(incoming().sourceAccountId));
+      allow update: if isAdmin() && isValidId(loanId) && isValidLoan(incoming()) &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().principalAmount == existing().principalAmount &&
+        incoming().remainingAmount >= 0 &&
+        incoming().remainingAmount <= incoming().principalAmount;
+      allow delete: if isAdmin() && isValidId(loanId);
+    }
+
+    match /loan_payments/{paymentId} {
+      allow get: if isAdmin() && isValidId(paymentId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(paymentId) && isValidLoanPayment(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().remainingAfter <= incoming().remainingBefore &&
+        exists(/databases/$(database)/documents/loans/$(incoming().loanId)) &&
+        exists(/databases/$(database)/documents/accounts/$(incoming().accountId));
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(paymentId);
+    }
+
+    // Mini ATM Settings (Admin Write, Active Staff Read)
+    match /mini_atm_settings/{settingId} {
+      allow get: if isActiveStaff() && isValidId(settingId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(settingId) && isValidMiniAtmSetting(incoming()) &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(settingId) && isValidMiniAtmSetting(incoming()) &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Mini ATM Fee Override Audits (Immutable)
+    match /mini_atm_fee_audits/{auditId} {
+      allow get: if isActiveStaff() && isValidId(auditId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(auditId) && isValidMiniAtmFeeAudit(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/mini_atm_transactions/$(incoming().miniAtmTxId));
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(auditId);
+    }
+
+    // Mini ATM Transactions
+    match /mini_atm_transactions/{txId} {
+      allow get: if isActiveStaff() && isValidId(txId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(txId) && isValidMiniAtm(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/accounts/$(incoming().cashAccountId)) &&
+        exists(/databases/$(database)/documents/accounts/$(incoming().bankAccountId));
+      allow update: if isActiveStaff() && isValidId(txId) && isValidMiniAtm(incoming()) &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status != 'void' && (
+          isAdmin() ||
+          (existing().recordedByUid == request.auth.uid && incoming().status == 'void' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(txId);
+    }
+
+    // PPOB Transactions
+    match /ppob_transactions/{txId} {
+      allow get: if isActiveStaff() && isValidId(txId);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(txId) && isValidPpob(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/accounts/$(incoming().accountId)) &&
+        (!('cashAccountId' in incoming()) || incoming().cashAccountId == '' || exists(/databases/$(database)/documents/accounts/$(incoming().cashAccountId)));
+      allow update: if isActiveStaff() && isValidId(txId) && isValidPpob(incoming()) &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status != 'failed' && (
+          isAdmin() ||
+          (existing().recordedByUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'serialNumber', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(txId);
+    }
+
+    // Accounts (Kas & Rekening)
+    match /accounts/{accountId} {
+      allow get: if isActiveStaff() && isValidId(accountId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(accountId) && isValidAccount(incoming()) &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isActiveStaff() && isValidId(accountId) && isValidAccount(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (incoming().balance >= 0 && incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'updatedByUid', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(accountId);
+    }
+
+    // Cash Ledger
+    match /cash_ledger/{ledgerId} {
+      allow get: if isActiveStaff() && isValidId(ledgerId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(ledgerId) && isValidCashLedger(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/accounts/$(incoming().accountId)) && (
+          isAdmin() ||
+          (incoming().sourceModule in ['sale', 'mini_atm', 'ppob'] &&
+            (incoming().sourceModule != 'sale' || incoming().direction == 'in'))
+        );
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(ledgerId);
+    }
+
+    // Expenses
+    match /expenses/{expenseId} {
+      allow get: if isActiveStaff() && isValidId(expenseId);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(expenseId) && isValidExpense(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/accounts/$(incoming().accountId));
+      allow update: if isAdmin() && isValidId(expenseId) && isValidExpense(incoming()) &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(expenseId);
+    }
+
+    // Financial Summaries
+    match /financial_summaries/{summaryId} {
+      allow get: if isAdmin() && isValidId(summaryId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(summaryId) && isValidFinancialSummary(incoming()) &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(summaryId) && isValidFinancialSummary(incoming()) &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(summaryId);
+    }
+
+    // Reset Activity Audit Logs (Admin Only)
+    match /reset_logs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(logId) && isValidResetLog(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // Stock Opname Sessions & Items (Admin Write/Finalize, Active Staff Read-Only Sync)
+    match /stock_opnames/{opnameId} {
+      allow get: if isActiveStaff() && isValidId(opnameId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(opnameId) && isValidStockOpname(incoming()) &&
+        incoming().status == 'draft' &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(opnameId) && isValidStockOpname(incoming()) &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status == 'draft';
+      allow delete: if isAdmin() && isValidId(opnameId) && existing().status == 'draft';
+
+      match /items/{itemId} {
+        allow get: if isActiveStaff() && isValidId(opnameId) && isValidId(itemId);
+        allow list: if isActiveStaff();
+        allow create: if isAdmin() && isValidId(opnameId) && isValidId(itemId) && isValidStockOpnameItem(incoming()) &&
+          incoming().opnameId == opnameId &&
+          incoming().recordedByUid == request.auth.uid &&
+          incoming().updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/stock_opnames/$(opnameId)) &&
+          getAfter(/databases/$(database)/documents/stock_opnames/$(opnameId)).data.status == 'draft' &&
+          existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+        allow update: if isAdmin() && isValidId(opnameId) && isValidId(itemId) && isValidStockOpnameItem(incoming()) &&
+          incoming().opnameId == existing().opnameId &&
+          incoming().productId == existing().productId &&
+          incoming().updatedAt == request.time &&
+          get(/databases/$(database)/documents/stock_opnames/$(opnameId)).data.status == 'draft';
+        allow delete: if isAdmin() && isValidId(opnameId) && isValidId(itemId) &&
+          get(/databases/$(database)/documents/stock_opnames/$(opnameId)).data.status == 'draft';
+      }
+    }
+  }
+}

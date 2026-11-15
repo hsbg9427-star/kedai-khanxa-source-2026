@@ -1,0 +1,6 @@
+{
+  "name": "ADMIN WARUNG",
+  "description": "Aplikasi manajemen usaha mini retail, Mini ATM, dan PPOB dengan sinkronisasi real-time dan dukungan offline.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

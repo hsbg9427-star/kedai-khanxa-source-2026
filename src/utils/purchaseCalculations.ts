@@ -115,6 +115,11 @@ export function computePurchaseDraft(
         `Satuan "${item.unitName}" tidak terdaftar pada pengaturan produk "${item.product.name}".`
       );
     }
+    if (!chosenUnit.canBuy) {
+      throw new Error(
+        `Satuan "${chosenUnit.unitName}" pada produk "${item.product.name}" dinonaktifkan untuk pembelian.`
+      );
+    }
 
     const grossSubtotal = roundMoney(qty * unitCost);
     const lineDiscount = roundMoney(Math.max(0, Number(item.lineDiscount) || 0));

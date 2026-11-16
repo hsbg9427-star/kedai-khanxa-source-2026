@@ -114,7 +114,7 @@ export const UNIVERSAL_UNIT_TEMPLATES: UniversalUnitTemplate[] = [
   {
     id: 'mie',
     label: 'Mi Instan (PCS)',
-    description: 'Dasar PCS · Renteng (10), Dus (40)',
+    description: 'Dasar PCS · Renteng (12), Dus (40)',
     baseUnit: 'PCS',
     sellUnits: [
       { unitName: 'RENTENG', conversion: 12 },

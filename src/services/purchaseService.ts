@@ -819,13 +819,14 @@ export async function recordPurchaseReturn(
     livePurchase: Purchase,
     liveProduct: Product,
     liveAccount: Account | null,
-    liveSupplier: Supplier | null
+    liveSupplier: Supplier | null,
+    priorReturns: PurchaseReturn[] = input.priorReturnsForItem
   ): number => {
     const plan = computePurchaseReturnPlan({
       purchase: livePurchase,
       item: input.item,
       product: liveProduct,
-      priorReturnsForItem: input.priorReturnsForItem,
+      priorReturnsForItem: priorReturns,
       unitName: input.unitName,
       returnQty: input.returnQty,
       unitRefundPrice: input.unitRefundPrice,
@@ -991,6 +992,13 @@ export async function recordPurchaseReturn(
           const accSnap = input.account ? await tx.get(doc(db, 'accounts', input.account.id)) : null;
           const supId = input.purchase.supplierId || input.supplier?.id;
           const supSnap = supId ? await tx.get(doc(db, 'suppliers', supId)) : null;
+          const returnsSnap = await tx.get(
+            query(
+              collection(db, 'purchase_returns'),
+              where('purchaseId', '==', input.purchase.id),
+              where('productId', '==', input.product.id)
+            )
+          );
 
           if (!pSnap.exists()) throw new Error('Data faktur pembelian tidak ditemukan.');
           if (!prodSnap.exists()) throw new Error('Data produk tidak ditemukan.');
@@ -1006,12 +1014,18 @@ export async function recordPurchaseReturn(
               ? { id: supSnap.id, ...(supSnap.data() as Omit<Supplier, 'id'>) }
               : null;
 
+          const livePriorReturns: PurchaseReturn[] = returnsSnap.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<PurchaseReturn, 'id'>),
+          }));
+
           finalRefund = applyReturnWrites(
             tx,
             livePurchase,
             liveProduct,
             liveAccount,
-            liveSupplier
+            liveSupplier,
+            livePriorReturns
           );
         });
       } catch (err) {

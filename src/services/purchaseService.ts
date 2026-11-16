@@ -995,8 +995,7 @@ export async function recordPurchaseReturn(
           const returnsSnap = await tx.get(
             query(
               collection(db, 'purchase_returns'),
-              where('purchaseId', '==', input.purchase.id),
-              where('productId', '==', input.product.id)
+              where('purchaseId', '==', input.purchase.id)
             )
           );
 
@@ -1014,10 +1013,12 @@ export async function recordPurchaseReturn(
               ? { id: supSnap.id, ...(supSnap.data() as Omit<Supplier, 'id'>) }
               : null;
 
-          const livePriorReturns: PurchaseReturn[] = returnsSnap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<PurchaseReturn, 'id'>),
-          }));
+          const livePriorReturns: PurchaseReturn[] = returnsSnap.docs
+            .filter((d) => d.data().productId === input.product.id)
+            .map((d) => ({
+              id: d.id,
+              ...(d.data() as Omit<PurchaseReturn, 'id'>),
+            }));
 
           finalRefund = applyReturnWrites(
             tx,

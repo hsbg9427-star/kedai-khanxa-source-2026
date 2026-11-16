@@ -55,15 +55,15 @@ export const UNIVERSAL_UNIT_TEMPLATES: UniversalUnitTemplate[] = [
   {
     id: 'rokok',
     label: 'Rokok (BUNGKUS)',
-    description: 'Dasar BUNGKUS · Slop (10 Bungkus), Batang (1 Bungkus = 20 Batang)',
+    description: 'Dasar BUNGKUS · Slop (10 Bungkus), Batang (1 Bungkus = 16 Batang)',
     baseUnit: 'BUNGKUS',
     sellUnits: [
       { unitName: 'SLOP', conversion: 10, conversionMode: 'multiply', canBuy: true, canSell: true },
       {
         unitName: 'BATANG',
-        conversion: 0.05,
+        conversion: 1 / 16,
         conversionMode: 'divide',
-        perBaseQty: 20,
+        perBaseQty: 16,
         canBuy: false,
         canSell: true,
       },
@@ -71,23 +71,23 @@ export const UNIVERSAL_UNIT_TEMPLATES: UniversalUnitTemplate[] = [
   },
   {
     id: 'kiloan',
-    label: 'Gula / Kiloan (GRAM)',
-    description: 'Dasar GRAM · 250g, 500g, 1 KG',
-    baseUnit: 'GRAM',
+    label: 'Gula / Barang Kiloan (KG)',
+    description: 'Dasar KG · Gram (1 KG = 1000 gram), 250 gram, 500 gram',
+    baseUnit: 'KG',
     sellUnits: [
-      { unitName: '250 GRAM', conversion: 250 },
-      { unitName: '500 GRAM', conversion: 500 },
-      { unitName: 'KG', conversion: 1000 },
+      { unitName: 'GRAM', conversion: 1 / 1000, conversionMode: 'divide', perBaseQty: 1000 },
+      { unitName: '250 GRAM', conversion: 1 / 4, conversionMode: 'divide', perBaseQty: 4 },
+      { unitName: '500 GRAM', conversion: 1 / 2, conversionMode: 'divide', perBaseQty: 2 },
     ],
   },
   {
     id: 'beras',
-    label: 'Beras (GRAM)',
-    description: 'Dasar GRAM · KG (1000g), Karung (25000g)',
-    baseUnit: 'GRAM',
+    label: 'Beras (KG)',
+    description: 'Dasar KG · Gram (1 KG = 1000 gram), Karung (25 KG)',
+    baseUnit: 'KG',
     sellUnits: [
-      { unitName: 'KG', conversion: 1000 },
-      { unitName: 'KARUNG', conversion: 25000 },
+      { unitName: 'GRAM', conversion: 1 / 1000, conversionMode: 'divide', perBaseQty: 1000 },
+      { unitName: 'KARUNG', conversion: 25, conversionMode: 'multiply' },
     ],
   },
   {
@@ -117,7 +117,7 @@ export const UNIVERSAL_UNIT_TEMPLATES: UniversalUnitTemplate[] = [
     description: 'Dasar PCS · Renteng (10), Dus (40)',
     baseUnit: 'PCS',
     sellUnits: [
-      { unitName: 'RENTENG', conversion: 10 },
+      { unitName: 'RENTENG', conversion: 12 },
       { unitName: 'DUS', conversion: 40 },
     ],
   },

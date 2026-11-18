@@ -659,31 +659,29 @@ export function CustomersPage({
                                 >
                                   <History className="w-4 h-4" />
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openEditCustomer(c)}
+                                  className="p-2 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-slate-900 cursor-pointer"
+                                  aria-label={`Ubah ${c.name}`}
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
                                 {isAdmin && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => openEditCustomer(c)}
-                                      className="p-2 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-slate-900 cursor-pointer"
-                                      aria-label={`Ubah ${c.name}`}
-                                    >
-                                      <Pencil className="w-4 h-4" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={hasDebt}
-                                      onClick={() => setConfirmDeleteId(c.id)}
-                                      title={
-                                        hasDebt
-                                          ? 'Lunasi piutang sebelum menghapus pelanggan'
-                                          : `Hapus ${c.name}`
-                                      }
-                                      className="p-2 rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-700 disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer"
-                                      aria-label={`Hapus ${c.name}`}
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
-                                  </>
+                                  <button
+                                    type="button"
+                                    disabled={hasDebt}
+                                    onClick={() => setConfirmDeleteId(c.id)}
+                                    title={
+                                      hasDebt
+                                        ? 'Lunasi piutang sebelum menghapus pelanggan'
+                                        : `Hapus ${c.name}`
+                                    }
+                                    className="p-2 rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-700 disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer"
+                                    aria-label={`Hapus ${c.name}`}
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
                                 )}
                               </div>
                             )}
@@ -762,16 +760,14 @@ export function CustomersPage({
                           <History className="w-3.5 h-3.5" />
                           <span>Riwayat</span>
                         </button>
-                        {isAdmin && (
-                          <button
-                            type="button"
-                            onClick={() => openEditCustomer(c)}
-                            className="min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 inline-flex items-center justify-center cursor-pointer"
-                            aria-label={`Ubah ${c.name}`}
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => openEditCustomer(c)}
+                          className="min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 inline-flex items-center justify-center cursor-pointer"
+                          aria-label={`Ubah ${c.name}`}
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
                   );
@@ -790,11 +786,9 @@ export function CustomersPage({
                 Buku Mutasi Kasbon &amp; Pelunasan
               </h3>
             </div>
-            {!isAdmin && (
-              <span className="text-xs text-slate-500">
-                Menampilkan transaksi yang Anda catat
-              </span>
-            )}
+            <span className="text-xs text-slate-500">
+              Tersinkronisasi real-time (Admin &amp; Kasir)
+            </span>
           </div>
 
           {receivablesLoading ? (

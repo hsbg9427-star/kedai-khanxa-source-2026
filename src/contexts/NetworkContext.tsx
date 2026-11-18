@@ -34,11 +34,31 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    recheckConnection();
+    let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const runCheck = async () => {
+      if (!active) return;
+      setFirestoreStatus('checking');
+      const status = await testFirestoreConnection();
+      if (!active) return;
+      setFirestoreStatus(status);
+      if (status === 'connected') {
+        setLastSyncedAt(new Date());
+      } else if (status === 'offline' && typeof navigator !== 'undefined' && navigator.onLine) {
+        retryTimer = setTimeout(() => {
+          if (active && navigator.onLine) {
+            void runCheck();
+          }
+        }, 5000);
+      }
+    };
+
+    void runCheck();
 
     const handleOnline = () => {
       setIsOnline(true);
-      recheckConnection();
+      void runCheck();
     };
     const handleOffline = () => {
       setIsOnline(false);
@@ -50,17 +70,19 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
 
     const unsubscribeSync = onSnapshotsInSync(db, () => {
       setHasPendingSync(false);
-      if (navigator.onLine) {
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
         setLastSyncedAt(new Date());
       }
     });
 
     return () => {
+      active = false;
+      if (retryTimer) clearTimeout(retryTimer);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       unsubscribeSync();
     };
-  }, [recheckConnection]);
+  }, []);
 
   const markPendingWrite = useCallback((pending: boolean) => {
     setHasPendingSync(pending);

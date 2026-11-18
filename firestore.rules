@@ -180,10 +180,14 @@ service cloud.firestore {
 
     function isValidProduct(data) {
       return data.keys().hasAll(['sku', 'name', 'categoryId', 'categoryName', 'unit', 'costPrice', 'sellPrice', 'stock', 'minStock', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['sku', 'barcode', 'name', 'photoDataUrl', 'categoryId', 'categoryName', 'unit', 'baseCanBuy', 'baseCanSell', 'costPrice', 'sellPrice', 'wholesalePrice', 'wholesaleMinQty', 'sellUnits', 'stock', 'minStock', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sku', 'barcode', 'name', 'brand', 'variant', 'identityKey', 'barcodeKey', 'photoDataUrl', 'categoryId', 'categoryName', 'unit', 'baseCanBuy', 'baseCanSell', 'costPrice', 'sellPrice', 'wholesalePrice', 'wholesaleMinQty', 'sellUnits', 'stock', 'minStock', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
         data.sku is string && data.sku.size() >= 1 && data.sku.size() <= 40 &&
         isOptString(data, 'barcode', 64) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        isOptString(data, 'brand', 60) &&
+        isOptString(data, 'variant', 80) &&
+        isOptString(data, 'identityKey', 64) &&
+        isOptString(data, 'barcodeKey', 64) &&
         isOptString(data, 'photoDataUrl', 80000) &&
         isValidId(data.categoryId) &&
         data.categoryName is string && data.categoryName.size() >= 1 && data.categoryName.size() <= 60 &&
@@ -254,7 +258,7 @@ service cloud.firestore {
 
     function isValidSale(data) {
       return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'totalItems', 'subtotal', 'discount', 'totalAmount', 'paidAmount', 'changeAmount', 'debtAmount', 'paymentMethod', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'totalItems', 'subtotal', 'discount', 'totalAmount', 'totalCost', 'totalProfit', 'paidAmount', 'changeAmount', 'debtAmount', 'paymentMethod', 'cashPaidPart', 'qrisAmount', 'qrisFeeRate', 'qrisFeeAmount', 'netReceivedAmount', 'accountId', 'qrisAccountId', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'totalItems', 'subtotal', 'discount', 'totalAmount', 'totalCost', 'totalProfit', 'paidAmount', 'changeAmount', 'debtAmount', 'paymentMethod', 'cashPaidPart', 'qrisAmount', 'qrisFeeRate', 'qrisFeeAmount', 'netReceivedAmount', 'accountId', 'qrisAccountId', 'expiredOverrideApproved', 'expiredOverrideByUid', 'expiredOverrideByName', 'expiredOverrideReason', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
         isValidTrxNum(data.transactionNumber) &&
         isValidDateStr(data.transactionDate) &&
         isValidTimeStr(data.transactionTime) &&
@@ -277,6 +281,10 @@ service cloud.firestore {
         (!('netReceivedAmount' in data) || (data.netReceivedAmount is number && data.netReceivedAmount >= 0)) &&
         isOptString(data, 'accountId', 128) &&
         isOptString(data, 'qrisAccountId', 128) &&
+        (!('expiredOverrideApproved' in data) || data.expiredOverrideApproved is bool) &&
+        (!('expiredOverrideByUid' in data) || isValidId(data.expiredOverrideByUid)) &&
+        isOptString(data, 'expiredOverrideByName', 100) &&
+        isOptString(data, 'expiredOverrideReason', 200) &&
         data.status in ['completed', 'void'] &&
         isValidId(data.recordedByUid) &&
         data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
@@ -754,6 +762,101 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidStockBatch(data) {
+      return data.keys().hasAll(['batchNumber', 'productId', 'productName', 'baseUnit', 'sourceType', 'startDate', 'estimatedExpiryDate', 'effectiveExpiryDate', 'initialBaseQty', 'remainingBaseQty', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['batchNumber', 'productId', 'productName', 'productBrand', 'productVariant', 'baseUnit', 'sourceType', 'sourceRefId', 'sourceNumber', 'supplierName', 'startDate', 'estimatedExpiryDate', 'actualExpiryDate', 'effectiveExpiryDate', 'initialBaseQty', 'remainingBaseQty', 'costPerBaseUnit', 'status', 'handlingNotes', 'handledDate', 'handledByUid', 'handledByName', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.batchNumber) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120 &&
+        isOptString(data, 'productBrand', 60) &&
+        isOptString(data, 'productVariant', 80) &&
+        data.baseUnit is string && data.baseUnit.size() >= 1 && data.baseUnit.size() <= 24 &&
+        data.sourceType in ['purchase', 'initial_product', 'manual_stock', 'excel_import'] &&
+        isOptString(data, 'sourceRefId', 128) &&
+        isOptString(data, 'sourceNumber', 40) &&
+        isOptString(data, 'supplierName', 120) &&
+        isValidDateStr(data.startDate) &&
+        isValidDateStr(data.estimatedExpiryDate) &&
+        (!('actualExpiryDate' in data) || isValidDateStr(data.actualExpiryDate)) &&
+        isValidDateStr(data.effectiveExpiryDate) &&
+        data.initialBaseQty is number && data.initialBaseQty >= 0 &&
+        data.remainingBaseQty is number && data.remainingBaseQty >= 0 &&
+        (!('costPerBaseUnit' in data) || (data.costPerBaseUnit is number && data.costPerBaseUnit >= 0)) &&
+        data.status in ['active', 'depleted', 'pulled', 'handled'] &&
+        isOptString(data, 'handlingNotes', 240) &&
+        (!('handledDate' in data) || isValidDateStr(data.handledDate)) &&
+        (!('handledByUid' in data) || isValidId(data.handledByUid)) &&
+        isOptString(data, 'handledByName', 100) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidProductIdentityLock(data) {
+      return data.keys().hasAll(['productId', 'productName', 'normalizedIdentity', 'createdByUid', 'createdAt']) &&
+        data.keys().hasOnly(['productId', 'productName', 'normalizedIdentity', 'createdByUid', 'createdAt']) &&
+        isValidId(data.productId) &&
+        data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120 &&
+        data.normalizedIdentity is string && data.normalizedIdentity.size() >= 1 && data.normalizedIdentity.size() <= 240 &&
+        isValidId(data.createdByUid) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidBarcodeLock(data) {
+      return data.keys().hasAll(['productId', 'barcode', 'normalizedBarcode', 'createdByUid', 'createdAt']) &&
+        data.keys().hasOnly(['productId', 'barcode', 'normalizedBarcode', 'createdByUid', 'createdAt']) &&
+        isValidId(data.productId) &&
+        data.barcode is string && data.barcode.size() >= 1 && data.barcode.size() <= 64 &&
+        data.normalizedBarcode is string && data.normalizedBarcode.size() >= 1 && data.normalizedBarcode.size() <= 64 &&
+        isValidId(data.createdByUid) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidCashierClosing(data) {
+      return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'periodStartDate', 'periodEndDate', 'openingCash', 'totalSalesAmount', 'retailTxCount', 'retailCashIn', 'retailQrisTotal', 'retailTransferTotal', 'retailDebtCreatedTotal', 'miniAtmTxCount', 'miniAtmCashIn', 'miniAtmCashOut', 'miniAtmNonCashTotal', 'ppobTxCount', 'ppobCashIn', 'ppobNonCashTotal', 'receivablePaymentCount', 'receivableCashIn', 'receivableNonCashIn', 'expectedCash', 'actualCash', 'varianceAmount', 'status', 'isFinalized', 'reviewStatus', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'shiftLabel', 'periodStartDate', 'periodEndDate', 'openingCash', 'totalSalesAmount', 'retailTxCount', 'retailCashIn', 'retailQrisTotal', 'retailTransferTotal', 'retailDebtCreatedTotal', 'miniAtmTxCount', 'miniAtmCashIn', 'miniAtmCashOut', 'miniAtmNonCashTotal', 'ppobTxCount', 'ppobCashIn', 'ppobNonCashTotal', 'receivablePaymentCount', 'receivableCashIn', 'receivableNonCashIn', 'expectedCash', 'actualCash', 'varianceAmount', 'status', 'notes', 'isFinalized', 'reviewStatus', 'reviewNote', 'reviewedByUid', 'reviewedByName', 'reviewedAtDate', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        isValidTrxNum(data.transactionNumber) &&
+        isValidDateStr(data.transactionDate) &&
+        isValidTimeStr(data.transactionTime) &&
+        isOptString(data, 'shiftLabel', 60) &&
+        isValidDateStr(data.periodStartDate) &&
+        isValidDateStr(data.periodEndDate) &&
+        data.periodStartDate <= data.periodEndDate &&
+        data.openingCash is number && data.openingCash >= 0 &&
+        data.totalSalesAmount is number && data.totalSalesAmount >= 0 &&
+        data.retailTxCount is number && data.retailTxCount >= 0 &&
+        data.retailCashIn is number && data.retailCashIn >= 0 &&
+        data.retailQrisTotal is number && data.retailQrisTotal >= 0 &&
+        data.retailTransferTotal is number && data.retailTransferTotal >= 0 &&
+        data.retailDebtCreatedTotal is number && data.retailDebtCreatedTotal >= 0 &&
+        data.miniAtmTxCount is number && data.miniAtmTxCount >= 0 &&
+        data.miniAtmCashIn is number && data.miniAtmCashIn >= 0 &&
+        data.miniAtmCashOut is number && data.miniAtmCashOut >= 0 &&
+        data.miniAtmNonCashTotal is number && data.miniAtmNonCashTotal >= 0 &&
+        data.ppobTxCount is number && data.ppobTxCount >= 0 &&
+        data.ppobCashIn is number && data.ppobCashIn >= 0 &&
+        data.ppobNonCashTotal is number && data.ppobNonCashTotal >= 0 &&
+        data.receivablePaymentCount is number && data.receivablePaymentCount >= 0 &&
+        data.receivableCashIn is number && data.receivableCashIn >= 0 &&
+        data.receivableNonCashIn is number && data.receivableNonCashIn >= 0 &&
+        data.expectedCash is number &&
+        data.actualCash is number && data.actualCash >= 0 &&
+        data.varianceAmount is number &&
+        data.status in ['balance', 'short', 'over'] &&
+        isOptString(data, 'notes', 300) &&
+        data.isFinalized is bool &&
+        data.reviewStatus in ['pending', 'verified', 'flagged'] &&
+        isOptString(data, 'reviewNote', 300) &&
+        (!('reviewedByUid' in data) || isValidId(data.reviewedByUid)) &&
+        isOptString(data, 'reviewedByName', 100) &&
+        (!('reviewedAtDate' in data) || isValidDateStr(data.reviewedAtDate)) &&
+        isValidId(data.recordedByUid) &&
+        data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // 4. Collection Rules
 
     // System Bootstrap Lock (Admin Utama Pertama)
@@ -877,7 +980,9 @@ service cloud.firestore {
         incoming().createdByUid == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
-        existsAfter(/databases/$(database)/documents/categories/$(incoming().categoryId));
+        existsAfter(/databases/$(database)/documents/categories/$(incoming().categoryId)) &&
+        (!('identityKey' in incoming()) || existsAfter(/databases/$(database)/documents/product_identity_locks/$(incoming().identityKey))) &&
+        (!('barcodeKey' in incoming()) || existsAfter(/databases/$(database)/documents/barcode_locks/$(incoming().barcodeKey)));
       allow update: if isActiveStaff() && isValidId(productId) && isValidProduct(incoming()) &&
         incoming().createdByUid == existing().createdByUid &&
         incoming().createdAt == existing().createdAt &&
@@ -888,10 +993,10 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(productId);
     }
 
-    // Price History
+    // Price History (Admin Only)
     match /price_history/{historyId} {
-      allow get: if isActiveStaff() && isValidId(historyId);
-      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow get: if isAdmin() && isValidId(historyId);
+      allow list: if isAdmin();
       allow create: if isAdmin() && isValidId(historyId) && isValidPriceHistory(incoming()) &&
         incoming().recordedByUid == request.auth.uid &&
         incoming().createdAt == request.time &&
@@ -900,9 +1005,9 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(historyId);
     }
 
-    // Stock Movements
+    // Stock Movements (Admin all, Kasir own create-out & own read)
     match /stock_movements/{movementId} {
-      allow get: if isActiveStaff() && isValidId(movementId);
+      allow get: if isActiveStaff() && isValidId(movementId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow create: if isActiveStaff() && isValidId(movementId) && isValidStockMovement(incoming()) &&
         incoming().recordedByUid == request.auth.uid &&
@@ -915,26 +1020,24 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(movementId);
     }
 
-    // Sales & Items
+    // Sales & Items (Admin all, Kasir own records only)
     match /sales/{saleId} {
-      allow get: if isActiveStaff() && isValidId(saleId);
+      allow get: if isActiveStaff() && isValidId(saleId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow create: if isActiveStaff() && isValidId(saleId) && isValidSale(incoming()) &&
         incoming().recordedByUid == request.auth.uid &&
         incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time;
-      allow update: if isActiveStaff() && isValidId(saleId) && isValidSale(incoming()) &&
+        incoming().updatedAt == request.time &&
+        (!('expiredOverrideApproved' in incoming()) || incoming().expiredOverrideApproved == false || isAdmin());
+      allow update: if isAdmin() && isValidId(saleId) && isValidSale(incoming()) &&
         incoming().recordedByUid == existing().recordedByUid &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
-        existing().status != 'void' && (
-          isAdmin() ||
-          (existing().recordedByUid == request.auth.uid && incoming().status == 'void' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
-        );
+        existing().status != 'void';
       allow delete: if isAdmin() && isValidId(saleId);
 
       match /items/{itemId} {
-        allow get: if isActiveStaff() && isValidId(saleId) && isValidId(itemId);
+        allow get: if isActiveStaff() && isValidId(saleId) && isValidId(itemId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
         allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
         allow create: if isActiveStaff() && isValidId(saleId) && isValidId(itemId) && isValidSaleItem(incoming()) &&
           incoming().saleId == saleId &&
@@ -1018,7 +1121,7 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(returnId);
     }
 
-    // Customers
+    // Customers (Kasir may read, create, update totalDebt or edit profile fields; Delete is Admin only)
     match /customers/{customerId} {
       allow get: if isActiveStaff() && isValidId(customerId);
       allow list: if isActiveStaff();
@@ -1031,14 +1134,15 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['totalDebt', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['totalDebt', 'updatedAt']) ||
+          (incoming().totalDebt == existing().totalDebt && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'address', 'notes', 'updatedAt']))
         );
       allow delete: if isAdmin() && isValidId(customerId);
     }
 
-    // Receivables
+    // Receivables (Admin all, Kasir own records)
     match /receivables/{receivableId} {
-      allow get: if isActiveStaff() && isValidId(receivableId);
+      allow get: if isActiveStaff() && isValidId(receivableId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow create: if isActiveStaff() && isValidId(receivableId) && isValidReceivable(incoming()) &&
         incoming().recordedByUid == request.auth.uid &&
@@ -1108,7 +1212,7 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(auditId);
     }
 
-    // Mini ATM Transactions
+    // Mini ATM Transactions (Admin all, Kasir own create & own read; void is Admin only)
     match /mini_atm_transactions/{txId} {
       allow get: if isActiveStaff() && isValidId(txId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
@@ -1118,20 +1222,17 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         exists(/databases/$(database)/documents/accounts/$(incoming().cashAccountId)) &&
         exists(/databases/$(database)/documents/accounts/$(incoming().bankAccountId));
-      allow update: if isActiveStaff() && isValidId(txId) && isValidMiniAtm(incoming()) &&
+      allow update: if isAdmin() && isValidId(txId) && isValidMiniAtm(incoming()) &&
         incoming().recordedByUid == existing().recordedByUid &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
-        existing().status != 'void' && (
-          isAdmin() ||
-          (existing().recordedByUid == request.auth.uid && incoming().status == 'void' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
-        );
+        existing().status != 'void';
       allow delete: if isAdmin() && isValidId(txId);
     }
 
-    // PPOB Transactions
+    // PPOB Transactions (Admin all, Kasir own records; update pending->completed/failed on own tx only)
     match /ppob_transactions/{txId} {
-      allow get: if isActiveStaff() && isValidId(txId);
+      allow get: if isActiveStaff() && isValidId(txId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
       allow create: if isActiveStaff() && isValidId(txId) && isValidPpob(incoming()) &&
         incoming().recordedByUid == request.auth.uid &&
@@ -1145,7 +1246,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         existing().status != 'failed' && (
           isAdmin() ||
-          (existing().recordedByUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'serialNumber', 'updatedAt']))
+          (existing().recordedByUid == request.auth.uid && existing().status == 'pending' && incoming().status in ['completed', 'failed'] && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'serialNumber', 'updatedAt']))
         );
       allow delete: if isAdmin() && isValidId(txId);
     }
@@ -1177,18 +1278,18 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         exists(/databases/$(database)/documents/accounts/$(incoming().accountId)) && (
           isAdmin() ||
-          (incoming().sourceModule in ['sale', 'mini_atm', 'ppob'] &&
-            (incoming().sourceModule != 'sale' || incoming().direction == 'in'))
+          incoming().sourceModule in ['mini_atm', 'ppob'] ||
+          (incoming().sourceModule in ['sale', 'receivable'] && incoming().direction == 'in')
         );
       allow update: if false;
       allow delete: if isAdmin() && isValidId(ledgerId);
     }
 
-    // Expenses
+    // Expenses (Admin Only)
     match /expenses/{expenseId} {
-      allow get: if isActiveStaff() && isValidId(expenseId);
-      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
-      allow create: if isActiveStaff() && isValidId(expenseId) && isValidExpense(incoming()) &&
+      allow get: if isAdmin() && isValidId(expenseId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(expenseId) && isValidExpense(incoming()) &&
         incoming().recordedByUid == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
@@ -1224,10 +1325,10 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Stock Opname Sessions & Items (Admin Write/Finalize, Active Staff Read-Only Sync)
+    // Stock Opname Sessions & Items (Admin Only)
     match /stock_opnames/{opnameId} {
-      allow get: if isActiveStaff() && isValidId(opnameId);
-      allow list: if isActiveStaff();
+      allow get: if isAdmin() && isValidId(opnameId);
+      allow list: if isAdmin();
       allow create: if isAdmin() && isValidId(opnameId) && isValidStockOpname(incoming()) &&
         incoming().status == 'draft' &&
         incoming().recordedByUid == request.auth.uid &&
@@ -1241,8 +1342,8 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(opnameId) && existing().status == 'draft';
 
       match /items/{itemId} {
-        allow get: if isActiveStaff() && isValidId(opnameId) && isValidId(itemId);
-        allow list: if isActiveStaff();
+        allow get: if isAdmin() && isValidId(opnameId) && isValidId(itemId);
+        allow list: if isAdmin();
         allow create: if isAdmin() && isValidId(opnameId) && isValidId(itemId) && isValidStockOpnameItem(incoming()) &&
           incoming().opnameId == opnameId &&
           incoming().recordedByUid == request.auth.uid &&
@@ -1258,6 +1359,81 @@ service cloud.firestore {
         allow delete: if isAdmin() && isValidId(opnameId) && isValidId(itemId) &&
           get(/databases/$(database)/documents/stock_opnames/$(opnameId)).data.status == 'draft';
       }
+    }
+
+    // Stock Batches (Batch & Masa Kedaluwarsa Independen)
+    match /stock_batches/{batchId} {
+      allow get: if isActiveStaff() && isValidId(batchId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(batchId) && isValidStockBatch(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+      allow update: if isActiveStaff() && isValidId(batchId) && isValidStockBatch(incoming()) &&
+        incoming().productId == existing().productId &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (incoming().diff(existing()).affectedKeys().hasOnly(['remainingBaseQty', 'status', 'updatedAt']) &&
+            incoming().remainingBaseQty >= 0 &&
+            incoming().remainingBaseQty <= existing().remainingBaseQty &&
+            incoming().status in ['active', 'depleted'])
+        );
+      allow delete: if isAdmin() && isValidId(batchId);
+    }
+
+    // Atomic Product Uniqueness Locks (Anti-Duplikasi Lintas Perangkat & Sinkronisasi Offline)
+    match /product_identity_locks/{lockId} {
+      allow get: if isActiveStaff() && isValidId(lockId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(lockId) &&
+        !exists(/databases/$(database)/documents/product_identity_locks/$(lockId)) &&
+        isValidProductIdentityLock(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(lockId);
+    }
+
+    match /barcode_locks/{lockId} {
+      allow get: if isActiveStaff() && isValidId(lockId);
+      allow list: if isActiveStaff();
+      allow create: if isAdmin() && isValidId(lockId) &&
+        !exists(/databases/$(database)/documents/barcode_locks/$(lockId)) &&
+        isValidBarcodeLock(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/products/$(incoming().productId));
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(lockId);
+    }
+
+    // Cashier Closings (Kasir create/read own finalized closing; immutable for Kasir; Admin examine/verify all)
+    match /cashier_closings/{closingId} {
+      allow get: if isActiveStaff() && isValidId(closingId) && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow list: if isVerified() && (isAdmin() || resource.data.recordedByUid == request.auth.uid);
+      allow create: if isActiveStaff() && isValidId(closingId) && isValidCashierClosing(incoming()) &&
+        incoming().recordedByUid == request.auth.uid &&
+        incoming().isFinalized == true &&
+        incoming().reviewStatus == 'pending' &&
+        !('reviewedByUid' in incoming()) &&
+        !('reviewedByName' in incoming()) &&
+        !('reviewedAtDate' in incoming()) &&
+        !('reviewNote' in incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          incoming().status == 'balance' ||
+          (('notes' in incoming()) && incoming().notes.size() >= 1)
+        );
+      allow update: if isAdmin() && isValidId(closingId) && isValidCashierClosing(incoming()) &&
+        incoming().recordedByUid == existing().recordedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['reviewStatus', 'reviewNote', 'reviewedByUid', 'reviewedByName', 'reviewedAtDate', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(closingId);
     }
   }
 }

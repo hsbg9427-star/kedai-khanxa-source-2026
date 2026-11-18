@@ -1,12 +1,16 @@
 import * as XLSX from 'xlsx';
 import type { Category, Product, ProductSellUnit } from '../types/database';
+import { isValidYmd } from './expiryUtils';
 import { getTodayDateString } from './formatters';
+import { normalizeDisplayText } from './productIdentity';
 
 export interface ImportedProductRow {
   rowIndex: number;
   sku: string;
   barcode: string;
   name: string;
+  brand?: string;
+  variant?: string;
   categoryName: string;
   categoryId: string;
   unit: string;
@@ -17,6 +21,7 @@ export interface ImportedProductRow {
   sellUnits?: ProductSellUnit[];
   stock: number;
   minStock: number;
+  actualExpiryDate?: string;
 }
 
 function formatSellUnitsText(units: ProductSellUnit[] | undefined): string {
@@ -79,6 +84,8 @@ export function exportProductsToExcel(products: Product[], storeName: string): v
     'Kode Barang': p.sku,
     Barcode: p.barcode || '',
     'Nama Barang': p.name,
+    Merek: p.brand || '',
+    'Varian / Ukuran': p.variant || '',
     Kategori: p.categoryName,
     'Satuan Dasar': p.unit,
     'Harga Beli (HPP)': p.costPrice,
@@ -104,6 +111,8 @@ export function exportProductsToExcel(products: Product[], storeName: string): v
     { wch: 14 },
     { wch: 18 },
     { wch: 28 },
+    { wch: 18 },
+    { wch: 20 },
     { wch: 24 },
     { wch: 14 },
     { wch: 16 },
@@ -130,6 +139,8 @@ export function downloadProductImportTemplate(categories: Category[]): void {
       'Kode Barang': 'KK-0001',
       Barcode: '8991002101014',
       'Nama Barang': 'Contoh Produk (Hapus Baris Ini)',
+      Merek: 'Indofood',
+      'Varian / Ukuran': 'Goreng 85gr',
       Kategori: sampleCategory,
       'Satuan Dasar': 'PCS',
       'Harga Beli (HPP)': 2500,
@@ -139,6 +150,7 @@ export function downloadProductImportTemplate(categories: Category[]): void {
       'Satuan Tambahan': 'DUS=40:112000',
       Stok: 80,
       'Stok Minimum': 20,
+      'Kedaluwarsa Kemasan (YYYY-MM-DD)': '',
     },
   ];
 
@@ -147,6 +159,8 @@ export function downloadProductImportTemplate(categories: Category[]): void {
     { wch: 14 },
     { wch: 18 },
     { wch: 30 },
+    { wch: 18 },
+    { wch: 20 },
     { wch: 24 },
     { wch: 14 },
     { wch: 18 },
@@ -156,6 +170,7 @@ export function downloadProductImportTemplate(categories: Category[]): void {
     { wch: 28 },
     { wch: 10 },
     { wch: 14 },
+    { wch: 28 },
   ];
 
   const categorySheet = XLSX.utils.json_to_sheet(
@@ -198,6 +213,38 @@ function parseOptionalNumeric(val: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function parseOptionalYmdDate(val: unknown): string | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (val instanceof Date && !Number.isNaN(val.getTime())) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    const ymd = `${y}-${m}-${d}`;
+    return isValidYmd(ymd) ? ymd : undefined;
+  }
+  if (typeof val === 'number' && Number.isFinite(val) && val > 20000 && val < 90000) {
+    const parsed = XLSX.SSF.parse_date_code(val);
+    if (parsed && parsed.y && parsed.m && parsed.d) {
+      const ymd = `${String(parsed.y).padStart(4, '0')}-${String(parsed.m).padStart(2, '0')}-${String(
+        parsed.d
+      ).padStart(2, '0')}`;
+      return isValidYmd(ymd) ? ymd : undefined;
+    }
+  }
+  const str = String(val).trim();
+  if (!str) return undefined;
+  if (isValidYmd(str)) return str;
+  const dmyMatch = /^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$/.exec(str);
+  if (dmyMatch) {
+    const d = dmyMatch[1].padStart(2, '0');
+    const m = dmyMatch[2].padStart(2, '0');
+    const y = dmyMatch[3];
+    const ymd = `${y}-${m}-${d}`;
+    return isValidYmd(ymd) ? ymd : undefined;
+  }
+  return undefined;
+}
+
 export async function parseProductsExcelFile(
   file: File,
   categories: Category[],
@@ -227,15 +274,26 @@ export async function parseProductsExcelFile(
 
   rawRows.forEach((row, index) => {
     const rowNum = index + 2;
-    const rawName = String(
-      pickField(row, ['namabarang', 'nama', 'namaproduk', 'productname', 'name']) ?? ''
-    ).trim();
+    const rawName = normalizeDisplayText(
+      String(pickField(row, ['namabarang', 'nama', 'namaproduk', 'productname', 'name']) ?? '')
+    );
 
     if (!rawName || rawName.toLowerCase().includes('contoh produk')) {
       if (rawName.toLowerCase().includes('contoh produk')) return;
       errors.push(`Baris ${rowNum}: Nama barang kosong.`);
       return;
     }
+
+    const rawBrand = normalizeDisplayText(
+      String(pickField(row, ['merek', 'brand', 'merk']) ?? '')
+    ).slice(0, 60);
+
+    const rawVariant = normalizeDisplayText(
+      String(
+        pickField(row, ['varian', 'varianukuran', 'ukuran', 'rasa', 'berat', 'variant', 'size']) ??
+          ''
+      )
+    ).slice(0, 80);
 
     const rawSku = String(
       pickField(row, ['kodebarang', 'kode', 'sku', 'kodeproduk']) ?? ''
@@ -294,11 +352,25 @@ export async function parseProductsExcelFile(
       parseNumeric(pickField(row, ['stokminimum', 'minstok', 'minstock']), 5)
     );
 
+    const actualExpiryDate = parseOptionalYmdDate(
+      pickField(row, [
+        'kedaluwarsakemasanyyyymmdd',
+        'kedaluwarsakemasan',
+        'tanggalkedaluwarsa',
+        'kedaluwarsa',
+        'expired',
+        'expirydate',
+        'actualexpirydate',
+      ])
+    );
+
     validRows.push({
       rowIndex: rowNum,
       sku: sku.slice(0, 40),
       barcode,
       name: rawName.slice(0, 120),
+      ...(rawBrand ? { brand: rawBrand } : {}),
+      ...(rawVariant ? { variant: rawVariant } : {}),
       categoryId: matchedCat.id,
       categoryName: matchedCat.name.trim().slice(0, 60) || 'Produk lainnya',
       unit,
@@ -309,6 +381,7 @@ export async function parseProductsExcelFile(
       ...(sellUnits.length > 0 ? { sellUnits } : {}),
       stock,
       minStock,
+      ...(actualExpiryDate ? { actualExpiryDate } : {}),
     });
   });
 

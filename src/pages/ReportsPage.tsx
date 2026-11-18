@@ -24,6 +24,9 @@ import {
   TrendingUp,
   Wallet,
   X,
+  CalendarClock,
+  ArchiveX,
+  Check,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import type {
@@ -43,6 +46,7 @@ import type {
   PurchaseReturn,
   Sale,
   SaleItem,
+  StockBatch,
   StoreSetting,
   SupplierPayment,
 } from '../types/database';
@@ -58,6 +62,18 @@ import {
   fetchMissingSaleItems,
   subscribeFullReportExtras,
 } from '../services/fullReportService';
+import {
+  markBatchHandledByAdmin,
+  pullExpiredBatchStock,
+  updateBatchActualExpiry,
+} from '../services/batchService';
+import {
+  evaluateBatchExpiry,
+  EXPIRY_ESTIMATE_DISCLAIMER,
+  formatShortIdDate,
+  type EvaluatedBatchExpiry,
+} from '../utils/expiryUtils';
+import { formatProductFullName } from '../utils/productIdentity';
 import {
   formatQty,
   formatRupiah,
@@ -90,6 +106,7 @@ interface ReportsPageProps {
   storeSetting: StoreSetting | null;
   products?: Product[];
   categories?: Category[];
+  stockBatches?: StockBatch[];
 }
 
 const PERIOD_OPTIONS: { id: ExtendedReportPeriodType; label: string }[] = [
@@ -107,7 +124,7 @@ const TREND_GRANULARITY_OPTIONS: { id: TrendGranularity; label: string }[] = [
   { id: 'yearly', label: 'Tahunan' },
 ];
 
-type ReportSubTab = 'balance' | 'profit' | 'trends' | 'qris_expenses' | 'details';
+type ReportSubTab = 'balance' | 'profit' | 'trends' | 'qris_expenses' | 'details' | 'expiry';
 
 function formatDeltaText(pct: number | null, previousFormatted: string): {
   text: string;
@@ -131,6 +148,7 @@ export function ReportsPage({
   storeSetting,
   products = [],
   categories = [],
+  stockBatches = [],
 }: ReportsPageProps) {
   const { user, profile, isAdmin } = useAuth();
   const todayStr = getTodayDateString();
@@ -179,6 +197,17 @@ export function ReportsPage({
   const [deletingExpId, setDeletingExpId] = useState<string | null>(null);
   const [switchingHpp, setSwitchingHpp] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  // Filter & Penanganan Tab Monitoring Kedaluwarsa
+  const [expiryFilter, setExpiryFilter] = useState<
+    'all_alert' | 'expired' | 'near_expiry' | 'safe' | 'history_handled' | 'all'
+  >('all_alert');
+  const [selectedBatch, setSelectedBatch] = useState<(StockBatch & EvaluatedBatchExpiry) | null>(
+    null
+  );
+  const [batchActualInput, setBatchActualInput] = useState('');
+  const [batchNotesInput, setBatchNotesInput] = useState('');
+  const [savingBatchAction, setSavingBatchAction] = useState(false);
 
   const expLockRef = useRef(false);
 
@@ -398,6 +427,51 @@ export function ReportsPage({
     return list.slice().sort((a, b) => a.name.localeCompare(b.name));
   }, [products, trendCategoryId]);
 
+  const expiryReport = useMemo(() => {
+    const evaluated = stockBatches
+      .map((b) => ({
+        ...b,
+        ...evaluateBatchExpiry(b, todayStr),
+      }))
+      .sort((a, b) => a.effectiveExpiryDate.localeCompare(b.effectiveExpiryDate));
+
+    const activePositive = evaluated.filter(
+      (b) => b.status === 'active' && Number(b.remainingBaseQty) > 0.0001
+    );
+    const expiredActive = activePositive.filter((b) => b.expiryStatus === 'EXPIRED');
+    const nearExpiryActive = activePositive.filter((b) => b.expiryStatus === 'MENDEKATI EXPIRED');
+    const safeActive = activePositive.filter((b) => b.expiryStatus === 'AMAN');
+    const historyHandled = evaluated.filter(
+      (b) => b.status === 'pulled' || b.status === 'handled' || b.status === 'depleted'
+    );
+
+    const nearExpiryProductCount = new Set(nearExpiryActive.map((b) => b.productId)).size;
+
+    const filteredRows =
+      expiryFilter === 'all_alert'
+        ? [...expiredActive, ...nearExpiryActive]
+        : expiryFilter === 'expired'
+          ? expiredActive
+          : expiryFilter === 'near_expiry'
+            ? nearExpiryActive
+            : expiryFilter === 'safe'
+              ? safeActive
+              : expiryFilter === 'history_handled'
+                ? historyHandled
+                : evaluated;
+
+    return {
+      evaluated,
+      expiredActive,
+      nearExpiryActive,
+      safeActive,
+      historyHandled,
+      nearExpiryProductCount,
+      alertTotalCount: expiredActive.length + nearExpiryActive.length,
+      filteredRows,
+    };
+  }, [stockBatches, todayStr, expiryFilter]);
+
   if (!isAdmin) {
     return (
       <div className="bg-white border border-red-200 rounded-xl p-6 text-sm text-red-700 flex items-center gap-3">
@@ -492,6 +566,81 @@ export function ReportsPage({
       setFeedback({ kind: 'err', text: getReadableFirestoreError(err) });
     } finally {
       setDeletingExpId(null);
+    }
+  };
+
+  const openReportBatchModal = (batch: StockBatch & EvaluatedBatchExpiry) => {
+    setSelectedBatch(batch);
+    setBatchActualInput(batch.actualExpiryDate || '');
+    setBatchNotesInput(batch.handlingNotes || '');
+    setFeedback(null);
+  };
+
+  const handleSaveBatchActualInReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedBatch || savingBatchAction) return;
+    setSavingBatchAction(true);
+    try {
+      await updateBatchActualExpiry(selectedBatch, batchActualInput.trim() || null);
+      setFeedback({
+        kind: 'ok',
+        text: `Tanggal kedaluwarsa batch ${selectedBatch.batchNumber} berhasil diperbarui.`,
+      });
+      setSelectedBatch(null);
+    } catch (err) {
+      setFeedback({
+        kind: 'err',
+        text: err instanceof Error ? err.message : getReadableFirestoreError(err),
+      });
+    } finally {
+      setSavingBatchAction(false);
+    }
+  };
+
+  const handlePullBatchInReport = async () => {
+    if (!selectedBatch || !user || savingBatchAction) return;
+    setSavingBatchAction(true);
+    try {
+      const linkedProduct = products.find((p) => p.id === selectedBatch.productId);
+      await pullExpiredBatchStock(selectedBatch, linkedProduct, batchNotesInput, {
+        uid: user.uid,
+        displayName: profile?.displayName || user.displayName || 'Admin',
+      });
+      setFeedback({
+        kind: 'ok',
+        text: `Stok batch ${selectedBatch.batchNumber} ditarik dari rak dan tercatat di riwayat batch.`,
+      });
+      setSelectedBatch(null);
+    } catch (err) {
+      setFeedback({
+        kind: 'err',
+        text: err instanceof Error ? err.message : getReadableFirestoreError(err),
+      });
+    } finally {
+      setSavingBatchAction(false);
+    }
+  };
+
+  const handleMarkBatchHandledInReport = async () => {
+    if (!selectedBatch || !user || savingBatchAction) return;
+    setSavingBatchAction(true);
+    try {
+      await markBatchHandledByAdmin(selectedBatch, batchNotesInput, {
+        uid: user.uid,
+        displayName: profile?.displayName || user.displayName || 'Admin',
+      });
+      setFeedback({
+        kind: 'ok',
+        text: `Batch ${selectedBatch.batchNumber} ditandai sudah ditangani Admin.`,
+      });
+      setSelectedBatch(null);
+    } catch (err) {
+      setFeedback({
+        kind: 'err',
+        text: err instanceof Error ? err.message : getReadableFirestoreError(err),
+      });
+    } finally {
+      setSavingBatchAction(false);
     }
   };
 
@@ -709,6 +858,32 @@ export function ReportsPage({
         >
           <ShoppingBag className="w-4 h-4" />
           <span>Rincian Transaksi</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSubTab('expiry')}
+          className={`min-h-[44px] inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border cursor-pointer whitespace-nowrap shrink-0 ${
+            subTab === 'expiry'
+              ? 'bg-emerald-700 text-white border-emerald-700'
+              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          <CalendarClock className="w-4 h-4" />
+          <span>Monitoring Kedaluwarsa</span>
+          {expiryReport.alertTotalCount > 0 && (
+            <span
+              className={`px-1.5 py-0.5 rounded font-mono-num text-[11px] font-bold ${
+                subTab === 'expiry'
+                  ? 'bg-white/20 text-white'
+                  : expiryReport.expiredActive.length > 0
+                    ? 'bg-red-100 text-red-800'
+                    : 'bg-amber-100 text-amber-900'
+              }`}
+            >
+              {expiryReport.alertTotalCount}
+            </span>
+          )}
         </button>
       </div>
 
@@ -2117,6 +2292,348 @@ export function ReportsPage({
                 </div>
               )}
             </section>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          TAB 6: MONITORING KEDALUWARSA & RIWAYAT BATCH
+      ===================================================================== */}
+      {subTab === 'expiry' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className="bg-white border border-red-200 rounded-xl p-4 space-y-1">
+              <div className="text-xs text-slate-500">Batch Kedaluwarsa (EXPIRED)</div>
+              <div className="font-mono-num text-2xl font-bold text-red-700">
+                {expiryReport.expiredActive.length}
+              </div>
+              <div className="text-[11px] text-red-700">Aktif · Perlu persetujuan/tarik</div>
+            </div>
+
+            <div className="bg-white border border-amber-200 rounded-xl p-4 space-y-1">
+              <div className="text-xs text-slate-500">Mendekati Expired (1–30 Hr)</div>
+              <div className="font-mono-num text-2xl font-bold text-amber-800">
+                {expiryReport.nearExpiryActive.length}
+              </div>
+              <div className="text-[11px] text-amber-800 font-mono-num">
+                {expiryReport.nearExpiryProductCount} produk terpantau
+              </div>
+            </div>
+
+            <div className="bg-white border border-emerald-200 rounded-xl p-4 space-y-1">
+              <div className="text-xs text-slate-500">Batch Aman (&gt; 30 Hari)</div>
+              <div className="font-mono-num text-2xl font-bold text-emerald-700">
+                {expiryReport.safeActive.length}
+              </div>
+              <div className="text-[11px] text-slate-500">Status AMAN</div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
+              <div className="text-xs text-slate-500">Riwayat Ditangani / Habis</div>
+              <div className="font-mono-num text-2xl font-bold text-slate-900">
+                {expiryReport.historyHandled.length}
+              </div>
+              <div className="text-[11px] text-slate-500">Riwayat tetap tersimpan</div>
+            </div>
+          </div>
+
+          <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <h3 className="font-display font-semibold text-base text-slate-900">
+                  MONITORING KEDALUWARSA &amp; RIWAYAT BATCH
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Diurutkan dari tanggal kedaluwarsa paling dekat. Riwayat batch kedaluwarsa tidak dihapus otomatis.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  { id: 'all_alert' as const, label: `Perlu Perhatian (${expiryReport.alertTotalCount})` },
+                  { id: 'expired' as const, label: `EXPIRED (${expiryReport.expiredActive.length})` },
+                  { id: 'near_expiry' as const, label: `1–30 Hari (${expiryReport.nearExpiryActive.length})` },
+                  { id: 'safe' as const, label: `AMAN (${expiryReport.safeActive.length})` },
+                  { id: 'history_handled' as const, label: `Riwayat (${expiryReport.historyHandled.length})` },
+                  { id: 'all' as const, label: `Semua (${expiryReport.evaluated.length})` },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setExpiryFilter(opt.id)}
+                    className={`min-h-[36px] px-3 py-1 rounded-lg border text-xs font-medium cursor-pointer ${
+                      expiryFilter === opt.id
+                        ? 'bg-emerald-700 text-white border-emerald-700'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {expiryReport.filteredRows.length === 0 ? (
+              <div className="p-8 text-center text-sm text-slate-500">
+                Tidak ada data batch pada filter ini.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
+                      <th className="py-3 px-4 whitespace-nowrap">Batch &amp; Produk</th>
+                      <th className="py-3 px-4 whitespace-nowrap">Tanggal Awal</th>
+                      <th className="py-3 px-4 whitespace-nowrap">Kedaluwarsa Aktif</th>
+                      <th className="py-3 px-4 whitespace-nowrap">Sisa Hari</th>
+                      <th className="py-3 px-4 text-right whitespace-nowrap">Stok Batch</th>
+                      <th className="py-3 px-4 whitespace-nowrap">Status</th>
+                      <th className="py-3 px-4 text-right whitespace-nowrap">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs sm:text-sm">
+                    {expiryReport.filteredRows.map((b) => {
+                      const isHandledHistory = b.status !== 'active';
+                      return (
+                        <tr
+                          key={b.id}
+                          className={
+                            isHandledHistory
+                              ? 'bg-slate-50/60 hover:bg-slate-100/70'
+                              : b.expiryStatus === 'EXPIRED'
+                                ? 'bg-red-50/40 hover:bg-red-50/70'
+                                : b.expiryStatus === 'MENDEKATI EXPIRED'
+                                  ? 'bg-amber-50/30 hover:bg-amber-50/60'
+                                  : 'hover:bg-slate-50'
+                          }
+                        >
+                          <td className="py-3 px-4">
+                            <div className="font-semibold text-slate-900">
+                              {formatProductFullName({
+                                name: b.productName,
+                                brand: b.productBrand,
+                                variant: b.productVariant,
+                              })}
+                            </div>
+                            <div className="font-mono-num text-[11px] text-slate-500">
+                              {b.batchNumber}
+                              {b.sourceNumber ? ` · ${b.sourceNumber}` : ''}
+                              {b.supplierName ? ` · ${b.supplierName}` : ''}
+                            </div>
+                            {b.handlingNotes && (
+                              <div className="text-[11px] text-slate-600 mt-0.5">
+                                Catatan Admin: {b.handlingNotes}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 font-mono-num text-xs text-slate-600 whitespace-nowrap">
+                            <div>{formatShortIdDate(b.startDate)}</div>
+                            <div className="text-[11px] text-slate-400">
+                              {b.sourceType === 'purchase'
+                                ? 'Pembelian'
+                                : b.sourceType === 'initial_product'
+                                  ? 'Stok Awal'
+                                  : b.sourceType === 'excel_import'
+                                    ? 'Import Excel'
+                                    : 'Input Stok'}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 font-mono-num whitespace-nowrap">
+                            <div className="font-semibold text-slate-900">
+                              {formatShortIdDate(b.effectiveExpiryDate)}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {b.isActualPackagingDate
+                                ? `Aktual Kemasan (Est. ${formatShortIdDate(b.estimatedExpiryDate)})`
+                                : 'Perkiraan +6 Bulan'}
+                            </div>
+                          </td>
+                          <td
+                            className={`py-3 px-4 font-mono-num font-semibold whitespace-nowrap ${
+                              isHandledHistory
+                                ? 'text-slate-500'
+                                : b.expiryStatus === 'EXPIRED'
+                                  ? 'text-red-700'
+                                  : b.expiryStatus === 'MENDEKATI EXPIRED'
+                                    ? 'text-amber-800'
+                                    : 'text-emerald-700'
+                            }`}
+                          >
+                            {isHandledHistory ? `Arsip (${b.remainingLabel})` : b.remainingLabel}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono-num whitespace-nowrap">
+                            <div className="font-semibold text-slate-900">
+                              {formatQty(b.remainingBaseQty)} {b.baseUnit}
+                            </div>
+                            <div className="text-[11px] text-slate-400">
+                              Awal {formatQty(b.initialBaseQty)} {b.baseUnit}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            {isHandledHistory ? (
+                              <span className="inline-block px-2 py-0.5 rounded border border-slate-300 bg-slate-100 text-[11px] font-mono-num font-semibold text-slate-700">
+                                {b.status === 'pulled'
+                                  ? 'DITARIK ADMIN'
+                                  : b.status === 'handled'
+                                    ? 'DITANGANI ADMIN'
+                                    : 'HABIS TERJUAL'}
+                              </span>
+                            ) : (
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded border text-[11px] font-mono-num font-bold ${
+                                  b.expiryStatus === 'EXPIRED'
+                                    ? 'bg-red-100 text-red-800 border-red-200'
+                                    : b.expiryStatus === 'MENDEKATI EXPIRED'
+                                      ? 'bg-amber-100 text-amber-900 border-amber-200'
+                                      : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                }`}
+                              >
+                                {b.expiryStatus}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => openReportBatchModal(b)}
+                              className="min-h-[34px] px-3 py-1 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:border-emerald-600 hover:text-emerald-800 cursor-pointer"
+                            >
+                              Detail / Tangani
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {/* Modal Detail & Penanganan Batch di Laporan */}
+      {selectedBatch && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-xl max-w-lg w-full max-h-[92vh] overflow-y-auto p-5 space-y-4">
+            <div className="flex items-start justify-between gap-2 border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="font-display font-bold text-base text-slate-900">
+                  Detail Batch &amp; Kedaluwarsa
+                </h3>
+                <p className="text-xs font-mono-num text-slate-500">
+                  {selectedBatch.batchNumber} · {selectedBatch.expiryStatus} ({selectedBatch.remainingLabel})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedBatch(null)}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-500 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-1.5 text-xs">
+              <div className="font-semibold text-sm text-slate-900">
+                {formatProductFullName({
+                  name: selectedBatch.productName,
+                  brand: selectedBatch.productBrand,
+                  variant: selectedBatch.productVariant,
+                })}
+              </div>
+              <div className="grid grid-cols-2 gap-2 pt-1 font-mono-num text-[11px] text-slate-600">
+                <div>
+                  Sisa stok:{' '}
+                  <strong className="text-slate-900">
+                    {formatQty(selectedBatch.remainingBaseQty)} {selectedBatch.baseUnit}
+                  </strong>
+                </div>
+                <div>Status sistem: {selectedBatch.status}</div>
+                <div>Tanggal awal: {formatShortIdDate(selectedBatch.startDate)}</div>
+                <div>Perkiraan +6 Bln: {formatShortIdDate(selectedBatch.estimatedExpiryDate)}</div>
+              </div>
+              <p className="text-[11px] text-slate-500 pt-1">{EXPIRY_ESTIMATE_DISCLAIMER}</p>
+            </div>
+
+            <form
+              onSubmit={handleSaveBatchActualInReport}
+              className="rounded-lg border border-slate-200 p-3 space-y-2.5"
+            >
+              <label
+                htmlFor="rep-batch-actual-ed"
+                className="block text-xs font-semibold text-slate-800"
+              >
+                Tanggal Kedaluwarsa Aktual Kemasan
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  id="rep-batch-actual-ed"
+                  type="date"
+                  value={batchActualInput}
+                  onChange={(e) => setBatchActualInput(e.target.value)}
+                  className="flex-1 min-w-[160px] min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+                {batchActualInput && (
+                  <button
+                    type="button"
+                    onClick={() => setBatchActualInput('')}
+                    className="min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-600 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Pakai Perkiraan +6 Bln
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={savingBatchAction}
+                  className="min-h-[40px] px-4 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 disabled:opacity-50 cursor-pointer"
+                >
+                  Simpan Tanggal ED
+                </button>
+              </div>
+            </form>
+
+            {selectedBatch.status === 'active' && (
+              <div className="rounded-lg border border-red-200 bg-red-50/40 p-3 space-y-3">
+                <div className="space-y-1">
+                  <label
+                    htmlFor="rep-batch-notes"
+                    className="block text-xs font-semibold text-slate-800"
+                  >
+                    Catatan Penanganan Admin
+                  </label>
+                  <input
+                    id="rep-batch-notes"
+                    type="text"
+                    maxLength={240}
+                    value={batchNotesInput}
+                    onChange={(e) => setBatchNotesInput(e.target.value)}
+                    placeholder="Contoh: Ditarik dari etalase / selesai dicek Admin"
+                    className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={savingBatchAction}
+                    onClick={handlePullBatchInReport}
+                    className="min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-red-700 text-white text-xs font-semibold hover:bg-red-800 disabled:opacity-50 cursor-pointer"
+                  >
+                    <ArchiveX className="w-4 h-4 shrink-0" />
+                    <span>Tarik Stok dari Rak</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingBatchAction}
+                    onClick={handleMarkBatchHandledInReport}
+                    className="min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4 shrink-0" />
+                    <span>Tandai Ditangani Admin</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

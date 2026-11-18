@@ -22,9 +22,11 @@ import type {
   Purchase,
   PurchaseItem,
   PurchaseReturn,
+  StockBatch,
   Supplier,
   SupplierPayment,
 } from '../types/database';
+import { buildStockBatchDocument } from './batchService';
 import { handleFirestoreError, OperationType } from '../utils/firestoreError';
 import { createTransactionMetadata, formatQty, formatRupiah, generateSafeId } from '../utils/formatters';
 import {
@@ -416,7 +418,7 @@ export async function recordPurchaseTransaction(
       });
     }
 
-    // Items + Stock Movements
+    // Items + Stock Batches + Stock Movements
     liveDraft.lines.forEach((line, idx) => {
       const itemId = generateSafeId(`pit${idx}`);
       writer.set(doc(db, 'purchases', purchaseId, 'items', itemId), {
@@ -440,6 +442,24 @@ export async function recordPurchaseTransaction(
         createdAt: serverTimestamp(),
       });
 
+      const batchDoc = buildStockBatchDocument({
+        productId: line.product.id,
+        productName: line.product.name,
+        productBrand: line.product.brand,
+        productVariant: line.product.variant,
+        baseUnit: line.baseUnit,
+        sourceType: 'purchase',
+        sourceRefId: purchaseId,
+        sourceNumber: meta.transactionNumber,
+        supplierName: cleanSupplierName,
+        startDate: input.purchaseDate,
+        actualExpiryDate: line.actualExpiryDate,
+        initialBaseQty: line.baseQuantity,
+        costPerBaseUnit: line.effectiveBaseUnitCost,
+        user,
+      });
+      writer.set(doc(db, 'stock_batches', batchDoc.id), batchDoc.data);
+
       const moveId = generateSafeId(`stk${idx}`);
       const convNote =
         line.conversion !== 1
@@ -461,7 +481,7 @@ export async function recordPurchaseTransaction(
         referenceId: purchaseId,
         notes: `Pembelian ${cleanSupplierName}${
           cleanInvoiceNumber ? ` #${cleanInvoiceNumber}` : ''
-        }${convNote}`.slice(0, 240),
+        }${convNote} · Batch ${batchDoc.data.batchNumber}`.slice(0, 240),
         createdAt: serverTimestamp(),
       });
     });
@@ -781,6 +801,7 @@ export interface RecordPurchaseReturnInput {
   settlementPreference: 'auto' | 'reduce_debt' | 'cash_refund';
   account?: Account | null;
   reason?: string;
+  batches?: StockBatch[];
 }
 
 export async function recordPurchaseReturn(
@@ -937,6 +958,30 @@ export async function recordPurchaseReturn(
       }${cleanReason ? ` · ${cleanReason}` : ''})`.slice(0, 240),
       createdAt: serverTimestamp(),
     });
+
+    // Kurangi stok pada batch yang berasal dari faktur pembelian ini bila tersedia
+    if (input.batches && input.batches.length > 0) {
+      let remToDeduct = plan.returnBaseQty;
+      const matchingBatches = input.batches.filter(
+        (b) =>
+          b.sourceRefId === livePurchase.id &&
+          b.productId === liveProduct.id &&
+          b.status === 'active' &&
+          Number(b.remainingBaseQty) > 0.00001
+      );
+      for (const b of matchingBatches) {
+        if (remToDeduct <= 0.0001) break;
+        const avail = Math.max(0, roundQty(Number(b.remainingBaseQty) || 0));
+        const take = roundQty(Math.min(avail, remToDeduct));
+        const nextRem = roundQty(Math.max(0, avail - take));
+        writer.update(doc(db, 'stock_batches', b.id), {
+          remainingBaseQty: nextRem <= 0.0001 ? 0 : nextRem,
+          status: nextRem <= 0.0001 ? 'depleted' : 'active',
+          updatedAt: serverTimestamp(),
+        });
+        remToDeduct = roundQty(Math.max(0, remToDeduct - take));
+      }
+    }
 
     writer.set(doc(db, 'purchase_returns', returnId), {
       ...meta,

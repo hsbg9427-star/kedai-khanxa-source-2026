@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+    color-scheme: light;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .font-mono-num {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+#pos-receipt-print-portal,
+#opname-report-print-portal {
+  display: none;
+}
+
+@media print {
+  body.pos-print-mode > #root,
+  body.opname-print-mode > #root {
+    display: none !important;
+  }
+
+  body.pos-print-mode > #pos-receipt-print-portal {
+    display: block !important;
+    padding: 8mm;
+    background: #ffffff;
+    color: #000000;
+  }
+
+  body.opname-print-mode > #opname-report-print-portal {
+    display: block !important;
+    padding: 10mm;
+    background: #ffffff;
+    color: #000000;
+  }
+}
+

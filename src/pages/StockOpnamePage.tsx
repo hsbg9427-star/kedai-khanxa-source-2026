@@ -121,8 +121,13 @@ export function StockOpnamePage({
     [opnames, selectedOpnameId]
   );
 
-  // Langganan daftar sesi Stok Opname secara real-time (tersinkronisasi HP Admin & Kasir)
+  // Langganan daftar sesi Stok Opname secara real-time (hanya Admin)
   useEffect(() => {
+    if (!isAdmin) {
+      setOpnames([]);
+      setOpnamesLoading(false);
+      return;
+    }
     setOpnamesLoading(true);
     const unsub = subscribeStockOpnames(
       (list) => {
@@ -135,11 +140,11 @@ export function StockOpnamePage({
       }
     );
     return () => unsub();
-  }, []);
+  }, [isAdmin]);
 
-  // Langganan item & pergerakan stok selama opname berlangsung
+  // Langganan item & pergerakan stok selama opname berlangsung (hanya Admin)
   useEffect(() => {
-    if (!selectedOpnameId) {
+    if (!isAdmin || !selectedOpnameId) {
       setOpnameItems([]);
       setMovementsDuringOpname([]);
       setEdits({});
@@ -162,10 +167,10 @@ export function StockOpnamePage({
     );
 
     return () => unsubItems();
-  }, [selectedOpnameId]);
+  }, [isAdmin, selectedOpnameId]);
 
   useEffect(() => {
-    if (!activeOpname) {
+    if (!isAdmin || !activeOpname) {
       setMovementsDuringOpname([]);
       return;
     }
@@ -181,7 +186,7 @@ export function StockOpnamePage({
       setMovementsDuringOpname(moves);
     });
     return () => unsubMoves();
-  }, [activeOpname?.id, activeOpname?.status, activeOpname?.startedAtMs]);
+  }, [isAdmin, activeOpname?.id, activeOpname?.status, activeOpname?.startedAtMs]);
 
   const canEditSession = Boolean(isAdmin && activeOpname && activeOpname.status === 'draft');
 
@@ -618,6 +623,17 @@ export function StockOpnamePage({
       </span>
     );
   };
+
+  if (!isAdmin) {
+    return (
+      <div className="bg-white border border-red-200 rounded-xl p-6 text-sm text-red-700 flex items-center gap-3">
+        <AlertCircle className="w-5 h-5 shrink-0" />
+        <span>
+          Akses ditolak. Modul Stok Opname dan Penyesuaian Persediaan hanya dapat diakses oleh Admin.
+        </span>
+      </div>
+    );
+  }
 
   // ============================================================================
   // VIEW 1: DAFTAR SESI STOK OPNAME

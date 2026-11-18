@@ -1,0 +1,10 @@
+{
+  "name": "kedai-khanxa-fase0-backup-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Toolkit standalone Tahap 0 untuk backup, restore uji proyek terpisah, dan verifikasi diff Firestore Kedai Khanxa.",
+  "dependencies": {
+    "firebase-admin": "^13.0.2"
+  }
+}

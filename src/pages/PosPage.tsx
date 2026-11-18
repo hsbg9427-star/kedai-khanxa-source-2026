@@ -16,10 +16,20 @@ import {
   UserPlus,
   Download,
   Share2,
+  AlertTriangle,
+  ShieldAlert,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
-import type { Account, Category, Customer, Product, Sale, StoreSetting } from '../types/database';
+import type {
+  Account,
+  Category,
+  Customer,
+  Product,
+  Sale,
+  StockBatch,
+  StoreSetting,
+} from '../types/database';
 import {
   fetchSaleReceiptFromSale,
   formatProductStockSummary,
@@ -58,6 +68,13 @@ import {
   type ReceiptPaperWidth,
 } from '../utils/receiptPrinter';
 import { BarcodeScannerModal } from '../components/BarcodeScannerModal';
+import {
+  formatShortIdDate,
+  summarizeProductBatches,
+  type EvaluatedBatchExpiry,
+  type ProductBatchSummary,
+} from '../utils/expiryUtils';
+import { formatProductFullName } from '../utils/productIdentity';
 
 interface PosPageProps {
   products: Product[];
@@ -65,6 +82,15 @@ interface PosPageProps {
   accounts: Account[];
   customers: Customer[];
   storeSetting: StoreSetting | null;
+  stockBatches?: StockBatch[];
+}
+
+interface ExpiredCartConflict {
+  product: Product;
+  demandedBase: number;
+  safeSellableStock: number;
+  expiredQtyNeeded: number;
+  expiredBatches: (StockBatch & EvaluatedBatchExpiry)[];
 }
 
 function CartQtyInput({
@@ -110,7 +136,14 @@ function CartQtyInput({
   );
 }
 
-export function PosPage({ products, categories, accounts, customers, storeSetting }: PosPageProps) {
+export function PosPage({
+  products,
+  categories,
+  accounts,
+  customers,
+  storeSetting,
+  stockBatches = [],
+}: PosPageProps) {
   const { user, profile, isAdmin } = useAuth();
   const { isOnline } = useNetwork();
 
@@ -147,10 +180,23 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
   const [recentSales, setRecentSales] = useState<Sale[]>([]);
   const [showScanner, setShowScanner] = useState(false);
 
+  // Modal Persetujuan Admin untuk Penjualan Stok Kedaluwarsa (EXPIRED)
+  const [expiredConflicts, setExpiredConflicts] = useState<ExpiredCartConflict[]>([]);
+  const [showExpiredOverrideModal, setShowExpiredOverrideModal] = useState(false);
+  const [expiredOverrideReason, setExpiredOverrideReason] = useState('');
+
   const activeAccounts = accounts.filter((a) => a.isActive);
   const activeProducts = products.filter((p) => p.isActive);
   const selectedCustomer = customers.find((c) => c.id === selectedCustomerId) || null;
   const qrisFeePercent = getEffectiveQrisFeePercent(storeSetting);
+
+  const batchSummaryByProductId = useMemo(() => {
+    const map = new Map<string, ProductBatchSummary>();
+    products.forEach((p) => {
+      map.set(p.id, summarizeProductBatches(p, stockBatches));
+    });
+    return map;
+  }, [products, stockBatches]);
 
   useEffect(() => {
     if (!receipt) {
@@ -355,20 +401,46 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
       existingLine?.tierPreference || 'auto'
     );
 
+    const nextProposedBase = roundQty(otherUsedBase + nextPricing.baseQuantity);
     if (
       !isStockSufficientWithTolerance(
         Number(product.stock) || 0,
-        roundQty(otherUsedBase + nextPricing.baseQuantity),
+        nextProposedBase,
         product
       )
     ) {
       setFeedback({
         kind: 'err',
         text: `Stok "${product.name}" tidak cukup (butuh ${formatQty(
-          roundQty(otherUsedBase + nextPricing.baseQuantity)
+          nextProposedBase
         )} ${product.unit}, tersedia ${formatProductStockSummary(product.stock, product).primary}).`,
       });
       return;
+    }
+
+    const batchSummary = batchSummaryByProductId.get(product.id);
+    const touchesExpiredBatch =
+      Boolean(batchSummary) &&
+      batchSummary!.expiredBatchStock > 0.0001 &&
+      nextProposedBase > batchSummary!.safeSellableStock + 0.0001;
+
+    if (touchesExpiredBatch && !isAdmin) {
+      setFeedback({
+        kind: 'err',
+        text: `Produk "${formatProductFullName(product)}" memiliki stok kedaluwarsa (EXPIRED). Stok aman tersisa ${formatQty(
+          batchSummary!.safeSellableStock
+        )} ${product.unit}; stok kedaluwarsa tidak boleh dijual tanpa persetujuan Admin.`,
+      });
+      return;
+    }
+
+    if (touchesExpiredBatch && isAdmin) {
+      setFeedback({
+        kind: 'err',
+        text: `Perhatian Admin: Jumlah "${formatProductFullName(product)}" menyentuh batch KEDALUWARSA (${formatQty(
+          batchSummary!.expiredBatchStock
+        )} ${product.unit}). Persetujuan eksplisit Admin akan diminta saat Checkout.`,
+      });
     }
 
     setCart((prev) => {
@@ -410,21 +482,38 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
       target.tierPreference
     );
 
+    const nextProposedBase = roundQty(otherUsedBase + nextPricing.baseQuantity);
     if (
       !isStockSufficientWithTolerance(
         Number(target.product.stock) || 0,
-        roundQty(otherUsedBase + nextPricing.baseQuantity),
+        nextProposedBase,
         target.product
       )
     ) {
       setFeedback({
         kind: 'err',
         text: `Stok "${target.product.name}" tidak mencukupi (butuh ${formatQty(
-          roundQty(otherUsedBase + nextPricing.baseQuantity)
+          nextProposedBase
         )} ${target.product.unit}, tersedia ${formatProductStockSummary(
           target.product.stock,
           target.product
         ).primary}).`,
+      });
+      return;
+    }
+
+    const batchSummary = batchSummaryByProductId.get(target.product.id);
+    if (
+      batchSummary &&
+      batchSummary.expiredBatchStock > 0.0001 &&
+      nextProposedBase > batchSummary.safeSellableStock + 0.0001 &&
+      !isAdmin
+    ) {
+      setFeedback({
+        kind: 'err',
+        text: `Stok aman "${target.product.name}" hanya ${formatQty(
+          batchSummary.safeSellableStock
+        )} ${target.product.unit}. Sisa stok berstatus EXPIRED dan tidak boleh dijual tanpa persetujuan Admin.`,
       });
       return;
     }
@@ -464,21 +553,38 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
     }, 0);
 
     const nextPricing = resolveUnitPricing(target.product, newUnitName, combinedQty, 'auto');
+    const nextProposedBase = roundQty(otherUsedBase + nextPricing.baseQuantity);
     if (
       !isStockSufficientWithTolerance(
         Number(target.product.stock) || 0,
-        roundQty(otherUsedBase + nextPricing.baseQuantity),
+        nextProposedBase,
         target.product
       )
     ) {
       setFeedback({
         kind: 'err',
         text: `Tidak bisa ubah ke satuan ${newUnitName}: butuh ${formatQty(
-          roundQty(otherUsedBase + nextPricing.baseQuantity)
+          nextProposedBase
         )} ${target.product.unit}, stok tersedia ${formatProductStockSummary(
           target.product.stock,
           target.product
         ).primary}.`,
+      });
+      return;
+    }
+
+    const batchSummary = batchSummaryByProductId.get(target.product.id);
+    if (
+      batchSummary &&
+      batchSummary.expiredBatchStock > 0.0001 &&
+      nextProposedBase > batchSummary.safeSellableStock + 0.0001 &&
+      !isAdmin
+    ) {
+      setFeedback({
+        kind: 'err',
+        text: `Tidak bisa ubah ke ${newUnitName}: stok aman "${target.product.name}" hanya ${formatQty(
+          batchSummary.safeSellableStock
+        )} ${target.product.unit} (sisanya EXPIRED dan butuh persetujuan Admin).`,
       });
       return;
     }
@@ -644,6 +750,119 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
     }
   };
 
+  const inspectExpiredCartConflicts = (targetCart: RetailCartItem[]): ExpiredCartConflict[] => {
+    const demandByProduct = new Map<string, { product: Product; totalBase: number }>();
+    targetCart.forEach((line) => {
+      const res = resolveUnitPricing(line.product, line.unitName, line.quantity, line.tierPreference);
+      const curr = demandByProduct.get(line.product.id);
+      if (curr) {
+        curr.totalBase = roundQty(curr.totalBase + res.baseQuantity);
+      } else {
+        demandByProduct.set(line.product.id, {
+          product: line.product,
+          totalBase: res.baseQuantity,
+        });
+      }
+    });
+
+    const conflicts: ExpiredCartConflict[] = [];
+    for (const [productId, { product, totalBase }] of demandByProduct.entries()) {
+      const summary = batchSummaryByProductId.get(productId);
+      if (!summary) continue;
+      if (summary.expiredBatchStock > 0.0001 && totalBase > summary.safeSellableStock + 0.0001) {
+        conflicts.push({
+          product,
+          demandedBase: totalBase,
+          safeSellableStock: summary.safeSellableStock,
+          expiredQtyNeeded: roundQty(Math.max(0, totalBase - summary.safeSellableStock)),
+          expiredBatches: summary.activeExpiredBatches,
+        });
+      }
+    }
+    return conflicts;
+  };
+
+  const executeCheckoutSale = async (
+    allowExpiredOverride: boolean,
+    overrideReason?: string
+  ) => {
+    if (!user || syncedCart.length === 0 || checkoutLockRef.current) return;
+
+    checkoutLockRef.current = true;
+    setProcessing(true);
+    setFeedback(null);
+
+    const chosenCashAccount = activeAccounts.find((a) => a.id === selectedAccountId) || null;
+    const chosenQrisAccount =
+      activeAccounts.find((a) => a.id === selectedQrisAccountId) || chosenCashAccount;
+
+    try {
+      const result = await recordRetailSale(
+        {
+          items: syncedCart,
+          discount: numDiscount,
+          paidAmount: numPaid,
+          paymentMethod,
+          cashPart: isMixedPayment ? numCashPart : undefined,
+          qrisPart: isMixedPayment ? numQrisPart : undefined,
+          qrisFeePercent,
+          account: isQrisPayment ? chosenQrisAccount : chosenCashAccount,
+          qrisAccount: chosenQrisAccount,
+          customer: selectedCustomer,
+          customerName: selectedCustomer ? selectedCustomer.name : customerName,
+          batches: stockBatches,
+          allowExpiredOverride,
+          expiredOverrideReason: overrideReason,
+        },
+        {
+          uid: user.uid,
+          displayName: profile?.displayName || user.displayName || 'Kasir',
+        }
+      );
+
+      setCart([]);
+      setDiscount('0');
+      setPaidAmount('');
+      setCashPart('');
+      setQrisPart('');
+      setCustomerName('');
+      setSelectedCustomerId('');
+      setPaymentMethod('cash');
+      setShowExpiredOverrideModal(false);
+      setExpiredConflicts([]);
+      setExpiredOverrideReason('');
+      setReceipt(result);
+      setFeedback({
+        kind: 'ok',
+        text: isOnline
+          ? result.debtAmount > 0
+            ? `Kasbon ${result.transactionNumber} untuk ${result.customerName} dicatat (${formatRupiah(
+                result.debtAmount
+              )} masuk piutang).`
+            : result.qrisFeeAmount > 0
+              ? `Transaksi ${result.transactionNumber} selesai. Omzet ${formatRupiah(
+                  result.totalAmount
+                )}, potongan QRIS ${formatRupiah(result.qrisFeeAmount)}, bersih ${formatRupiah(
+                  result.netReceivedAmount
+                )}.`
+              : isAdmin
+                ? `Transaksi ${result.transactionNumber} selesai. Stok terpotong otomatis, laba tercatat ${formatRupiah(
+                    result.totalProfit
+                  )}.`
+                : `Transaksi ${result.transactionNumber} selesai. Stok terpotong otomatis.`
+          : `Transaksi ${result.transactionNumber} disimpan lokal (offline) & stok langsung diperbarui.`,
+      });
+    } catch (error) {
+      setFeedback({
+        kind: 'err',
+        text: error instanceof Error ? error.message : getReadableFirestoreError(error),
+      });
+    } finally {
+      setProcessing(false);
+      checkoutLockRef.current = false;
+    }
+  };
+
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || syncedCart.length === 0 || checkoutLockRef.current) return;
@@ -690,71 +909,36 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
       return;
     }
 
-    checkoutLockRef.current = true;
-    setProcessing(true);
-    setFeedback(null);
+    const conflicts = inspectExpiredCartConflicts(syncedCart);
+    if (conflicts.length > 0) {
+      if (!isAdmin) {
+        const names = conflicts.map((c) => formatProductFullName(c.product)).join(', ');
+        setFeedback({
+          kind: 'err',
+          text: `Transaksi ditolak: ${names} memiliki stok KEDALUWARSA (EXPIRED) yang tidak boleh dijual tanpa persetujuan Admin.`,
+        });
+        return;
+      }
+      setExpiredConflicts(conflicts);
+      setExpiredOverrideReason('');
+      setShowExpiredOverrideModal(true);
+      return;
+    }
 
-    const chosenCashAccount = activeAccounts.find((a) => a.id === selectedAccountId) || null;
-    const chosenQrisAccount =
-      activeAccounts.find((a) => a.id === selectedQrisAccountId) || chosenCashAccount;
+    await executeCheckoutSale(false);
+  };
 
-    try {
-      const result = await recordRetailSale(
-        {
-          items: syncedCart,
-          discount: numDiscount,
-          paidAmount: numPaid,
-          paymentMethod,
-          cashPart: isMixedPayment ? numCashPart : undefined,
-          qrisPart: isMixedPayment ? numQrisPart : undefined,
-          qrisFeePercent,
-          account: isQrisPayment ? chosenQrisAccount : chosenCashAccount,
-          qrisAccount: chosenQrisAccount,
-          customer: selectedCustomer,
-          customerName: selectedCustomer ? selectedCustomer.name : customerName,
-        },
-        {
-          uid: user.uid,
-          displayName: profile?.displayName || user.displayName || 'Kasir',
-        }
-      );
-
-      setCart([]);
-      setDiscount('0');
-      setPaidAmount('');
-      setCashPart('');
-      setQrisPart('');
-      setCustomerName('');
-      setSelectedCustomerId('');
-      setPaymentMethod('cash');
-      setReceipt(result);
-      setFeedback({
-        kind: 'ok',
-        text: isOnline
-          ? result.debtAmount > 0
-            ? `Kasbon ${result.transactionNumber} untuk ${result.customerName} dicatat (${formatRupiah(
-                result.debtAmount
-              )} masuk piutang).`
-            : result.qrisFeeAmount > 0
-              ? `Transaksi ${result.transactionNumber} selesai. Omzet ${formatRupiah(
-                  result.totalAmount
-                )}, potongan QRIS ${formatRupiah(result.qrisFeeAmount)}, bersih ${formatRupiah(
-                  result.netReceivedAmount
-                )}.`
-              : `Transaksi ${result.transactionNumber} selesai. Stok terpotong otomatis, laba tercatat ${formatRupiah(
-                  result.totalProfit
-                )}.`
-          : `Transaksi ${result.transactionNumber} disimpan lokal (offline) & stok langsung diperbarui.`,
-      });
-    } catch (error) {
+  const handleConfirmExpiredOverride = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin) return;
+    if (expiredOverrideReason.trim().length < 3) {
       setFeedback({
         kind: 'err',
-        text: error instanceof Error ? error.message : getReadableFirestoreError(error),
+        text: 'Masukkan alasan persetujuan Admin minimal 3 karakter sebelum menjual barang kedaluwarsa.',
       });
-    } finally {
-      setProcessing(false);
-      checkoutLockRef.current = false;
+      return;
     }
+    await executeCheckoutSale(true, expiredOverrideReason.trim());
   };
 
   const filteredProducts = activeProducts.filter((p) => {
@@ -763,6 +947,8 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
       const q = searchQuery.trim().toLowerCase();
       return (
         p.name.toLowerCase().includes(q) ||
+        (p.brand || '').toLowerCase().includes(q) ||
+        (p.variant || '').toLowerCase().includes(q) ||
         p.sku.toLowerCase().includes(q) ||
         (p.barcode || '').toLowerCase().includes(q)
       );
@@ -852,21 +1038,32 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                   const defaultOpt = sellOpts[0];
                   const stockSummary = formatProductStockSummary(p.stock, p);
                   const remainingSummary = formatProductStockSummary(remaining, p);
+                  const batchSummary = batchSummaryByProductId.get(p.id);
+                  const allExpiredLockedForKasir =
+                    !isAdmin &&
+                    Boolean(batchSummary) &&
+                    batchSummary!.hasExpiredStock &&
+                    batchSummary!.safeSellableStock <= 0.0001;
+                  const cardDisabled = out || allExpiredLockedForKasir;
                   return (
                     <div
                       key={p.id}
                       className={`text-left border rounded-xl p-2 sm:p-3 flex flex-col justify-between gap-1.5 sm:gap-2 transition-colors ${
-                        out
-                          ? 'bg-slate-50 border-slate-200 opacity-60'
-                          : 'bg-white border-slate-200 hover:border-emerald-500 active:bg-emerald-50/40'
+                        cardDisabled
+                          ? 'bg-slate-50 border-slate-200 opacity-65'
+                          : batchSummary?.hasExpiredStock
+                            ? 'bg-red-50/30 border-red-200 hover:border-red-400'
+                            : batchSummary?.hasNearExpiry
+                              ? 'bg-amber-50/30 border-amber-200 hover:border-amber-400'
+                              : 'bg-white border-slate-200 hover:border-emerald-500 active:bg-emerald-50/40'
                       }`}
                     >
                       <button
                         type="button"
-                        disabled={out}
+                        disabled={cardDisabled}
                         onClick={() => addToCart(p)}
                         className={`text-left space-y-1.5 w-full ${
-                          out ? 'cursor-not-allowed' : 'cursor-pointer'
+                          cardDisabled ? 'cursor-not-allowed' : 'cursor-pointer'
                         }`}
                       >
                         {p.photoDataUrl ? (
@@ -881,8 +1078,15 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                             <Package className="w-5 h-5 sm:w-6 sm:h-6" />
                           </div>
                         )}
-                        <div className="text-xs sm:text-sm font-medium text-slate-900 line-clamp-2 leading-snug">
-                          {p.name}
+                        <div>
+                          <div className="text-xs sm:text-sm font-medium text-slate-900 line-clamp-2 leading-snug">
+                            {p.name}
+                          </div>
+                          {(p.brand || p.variant) && (
+                            <div className="text-[10px] text-slate-500 truncate">
+                              {[p.brand, p.variant].filter(Boolean).join(' · ')}
+                            </div>
+                          )}
                         </div>
                         <div className="space-y-0.5 pt-0.5">
                           <div className="font-mono-num text-xs sm:text-sm font-bold text-emerald-700 truncate">
@@ -925,6 +1129,18 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                               </>
                             )}
                           </div>
+                          {!out && batchSummary && batchSummary.hasExpiredStock && (
+                            <div className="text-[10px] font-semibold text-red-700 leading-tight">
+                              {allExpiredLockedForKasir
+                                ? 'EXPIRED · Butuh Admin'
+                                : `EXPIRED: ${formatQty(batchSummary.expiredBatchStock)} ${p.unit} (Aman ${formatQty(batchSummary.safeSellableStock)})`}
+                            </div>
+                          )}
+                          {!out && batchSummary && !batchSummary.hasExpiredStock && batchSummary.hasNearExpiry && batchSummary.nearestNonExpired && (
+                            <div className="text-[10px] font-semibold text-amber-700 leading-tight truncate">
+                              ED {formatShortIdDate(batchSummary.nearestNonExpired.effectiveExpiryDate)} ({batchSummary.nearestNonExpired.daysRemaining} hr)
+                            </div>
+                          )}
                         </div>
                       </button>
 
@@ -941,7 +1157,7 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                               <button
                                 key={opt.unitName}
                                 type="button"
-                                disabled={out || !canAddUnit}
+                                disabled={cardDisabled || !canAddUnit}
                                 onClick={() => addToCart(p, opt.unitName)}
                                 title={`Tambah 1 ${opt.unitName} (${formatRupiah(opt.sellPrice)})`}
                                 className="px-1.5 sm:px-2 py-1 rounded border border-slate-200 bg-slate-50 text-[10px] font-mono-num font-medium text-slate-700 hover:border-emerald-600 hover:bg-emerald-50 hover:text-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
@@ -1002,7 +1218,7 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                       <div className="flex items-start justify-between gap-1.5">
                         <div className="min-w-0 flex-1">
                           <div className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
-                            {item.product.name}
+                            {formatProductFullName(item.product)}
                           </div>
                           <div className="text-[10px] sm:text-xs font-mono-num text-slate-500 truncate">
                             {formatRupiah(pricing.unitPrice)} / {pricing.option.unitName}
@@ -1010,6 +1226,27 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                               ? ` (${formatUnitConversionLabel(pricing.option, item.product.unit)})`
                               : ''}
                           </div>
+                          {(() => {
+                            const bSum = batchSummaryByProductId.get(item.product.id);
+                            if (!bSum) return null;
+                            const usedBase = getTotalBaseUsedForProduct(syncedCart, item.product.id);
+                            if (bSum.expiredBatchStock > 0.0001 && usedBase > bSum.safeSellableStock + 0.0001) {
+                              return (
+                                <div className="text-[10px] font-semibold text-red-700 flex items-center gap-1 mt-0.5">
+                                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                                  <span>Menyentuh batch EXPIRED (Wajib Persetujuan Admin)</span>
+                                </div>
+                              );
+                            }
+                            if (bSum.hasNearExpiry && bSum.nearestNonExpired) {
+                              return (
+                                <div className="text-[10px] font-medium text-amber-700 mt-0.5">
+                                  ED terdekat: {formatShortIdDate(bSum.nearestNonExpired.effectiveExpiryDate)} ({bSum.nearestNonExpired.daysRemaining} hr)
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
                         </div>
                         <button
                           type="button"
@@ -1095,21 +1332,25 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                         </div>
                       </div>
 
-                      {/* Rincian Stok Terpotong, Subtotal, & Laba Baris */}
+                      {/* Rincian Stok Terpotong, Subtotal, & Laba Baris (Khusus Admin) */}
                       <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] sm:text-[11px] font-mono-num text-slate-500">
                         <span>
                           -{formatQty(pricing.baseQuantity)} {item.product.unit}
                         </span>
                         <span className="text-right">
                           <strong className="text-slate-900">{formatRupiah(pricing.lineRevenue)}</strong>
-                          {' · '}
-                          <span
-                            className={
-                              pricing.lineProfit >= 0 ? 'text-emerald-700 font-semibold' : 'text-red-700'
-                            }
-                          >
-                            +{formatRupiah(pricing.lineProfit)}
-                          </span>
+                          {isAdmin && (
+                            <>
+                              {' · '}
+                              <span
+                                className={
+                                  pricing.lineProfit >= 0 ? 'text-emerald-700 font-semibold' : 'text-red-700'
+                                }
+                              >
+                                +{formatRupiah(pricing.lineProfit)}
+                              </span>
+                            </>
+                          )}
                         </span>
                       </div>
                     </div>
@@ -1406,38 +1647,44 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                 </div>
               )}
 
-              <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1 text-[11px] sm:text-xs">
-                <div className="flex justify-between items-center text-slate-500">
-                  <span>Total HPP</span>
-                  <span className="font-mono-num">{formatRupiah(totalCost)}</span>
+              {(isAdmin || isQrisPayment || isMixedPayment) && (
+                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1 text-[11px] sm:text-xs">
+                  {isAdmin && (
+                    <>
+                      <div className="flex justify-between items-center text-slate-500">
+                        <span>Total HPP</span>
+                        <span className="font-mono-num">{formatRupiah(totalCost)}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-600">Estimasi Laba</span>
+                        <span
+                          className={`font-mono-num font-semibold ${
+                            estimatedProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
+                          }`}
+                        >
+                          {formatRupiah(estimatedProfit)}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                  {(isQrisPayment || isMixedPayment) && (
+                    <>
+                      <div className="flex justify-between items-center text-amber-700">
+                        <span>Pot. QRIS ({formatQty(qrisFeePercent)}%)</span>
+                        <span className="font-mono-num font-semibold">
+                          -{formatRupiah(previewSettlement.qrisFeeAmount)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-emerald-700">
+                        <span>Masuk Saldo Bersih</span>
+                        <span className="font-mono-num font-bold">
+                          {formatRupiah(previewSettlement.netReceivedAmount)}
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-600">Estimasi Laba</span>
-                  <span
-                    className={`font-mono-num font-semibold ${
-                      estimatedProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
-                    }`}
-                  >
-                    {formatRupiah(estimatedProfit)}
-                  </span>
-                </div>
-                {(isQrisPayment || isMixedPayment) && (
-                  <>
-                    <div className="flex justify-between items-center text-amber-700">
-                      <span>Pot. QRIS ({formatQty(qrisFeePercent)}%)</span>
-                      <span className="font-mono-num font-semibold">
-                        -{formatRupiah(previewSettlement.qrisFeeAmount)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-emerald-700">
-                      <span>Masuk Saldo Bersih</span>
-                      <span className="font-mono-num font-bold">
-                        {formatRupiah(previewSettlement.netReceivedAmount)}
-                      </span>
-                    </div>
-                  </>
-                )}
-              </div>
+              )}
             </div>
           </div>
 
@@ -1485,11 +1732,16 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
 
       {/* Riwayat Transaksi Kasir Terbaru */}
       <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
-          <Receipt className="w-4 h-4 text-slate-500" />
-          <h3 className="font-display font-semibold text-base text-slate-900">
-            Riwayat Penjualan Retail Terbaru
-          </h3>
+        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Receipt className="w-4 h-4 text-slate-500" />
+            <h3 className="font-display font-semibold text-base text-slate-900">
+              Riwayat Penjualan Retail Terbaru
+            </h3>
+          </div>
+          <span className="text-xs text-slate-500">
+            Tersinkronisasi real-time (Admin &amp; Kasir)
+          </span>
         </div>
         {recentSales.length === 0 ? (
           <div className="p-8 text-center text-sm text-slate-500">
@@ -1507,7 +1759,7 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                   <th className="py-3 px-4 text-right whitespace-nowrap">Item</th>
                   <th className="py-3 px-4 text-right whitespace-nowrap">Omzet</th>
                   <th className="py-3 px-4 text-right whitespace-nowrap">Pot. QRIS</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Laba</th>
+                  {isAdmin && <th className="py-3 px-4 text-right whitespace-nowrap">Laba</th>}
                   <th className="py-3 px-4 text-right whitespace-nowrap">Struk / WA</th>
                 </tr>
               </thead>
@@ -1544,9 +1796,11 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                     <td className="py-3 px-4 text-right font-mono-num text-xs text-amber-700 whitespace-nowrap">
                       {s.qrisFeeAmount && s.qrisFeeAmount > 0 ? formatRupiah(s.qrisFeeAmount) : '-'}
                     </td>
-                    <td className="py-3 px-4 text-right font-mono-num font-semibold text-emerald-700 whitespace-nowrap">
-                      {s.totalProfit !== undefined ? formatRupiah(s.totalProfit) : '-'}
-                    </td>
+                    {isAdmin && (
+                      <td className="py-3 px-4 text-right font-mono-num font-semibold text-emerald-700 whitespace-nowrap">
+                        {s.totalProfit !== undefined ? formatRupiah(s.totalProfit) : '-'}
+                      </td>
+                    )}
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       <button
                         type="button"
@@ -1692,23 +1946,27 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                     {receiptText}
                   </pre>
                 </div>
-                <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 space-y-1 text-[11px]">
-                  {receipt.qrisFeeAmount > 0 && (
-                    <div className="flex justify-between text-amber-800">
-                      <span>Potongan QRIS ({formatQty(receipt.qrisFeeRate)}%)</span>
-                      <span className="font-mono-num font-semibold">
-                        -{formatRupiah(receipt.qrisFeeAmount)} (Bersih{' '}
-                        {formatRupiah(receipt.netReceivedAmount)})
-                      </span>
-                    </div>
-                  )}
-                  <div className="flex justify-between text-slate-600">
-                    <span>Laba Penjualan (Catatan Internal)</span>
-                    <span className="font-mono-num font-semibold text-emerald-700">
-                      {formatRupiah(receipt.totalProfit)}
-                    </span>
+                {(isAdmin || receipt.qrisFeeAmount > 0) && (
+                  <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 space-y-1 text-[11px]">
+                    {receipt.qrisFeeAmount > 0 && (
+                      <div className="flex justify-between text-amber-800">
+                        <span>Potongan QRIS ({formatQty(receipt.qrisFeeRate)}%)</span>
+                        <span className="font-mono-num font-semibold">
+                          -{formatRupiah(receipt.qrisFeeAmount)} (Bersih{' '}
+                          {formatRupiah(receipt.netReceivedAmount)})
+                        </span>
+                      </div>
+                    )}
+                    {isAdmin && (
+                      <div className="flex justify-between text-slate-600">
+                        <span>Laba Penjualan (Catatan Internal)</span>
+                        <span className="font-mono-num font-semibold text-emerald-700">
+                          {formatRupiah(receipt.totalProfit)}
+                        </span>
+                      </div>
+                    )}
                   </div>
-                </div>
+                )}
               </div>
             ) : (
               <div className="space-y-3">
@@ -1808,12 +2066,14 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
                       </div>
                     </div>
                   )}
-                  <div className="flex justify-between text-[11px] text-slate-500 pt-1 border-t border-slate-100">
-                    <span>Laba Penjualan (Internal)</span>
-                    <span className="font-mono-num font-semibold text-emerald-700">
-                      {formatRupiah(receipt.totalProfit)}
-                    </span>
-                  </div>
+                  {isAdmin && (
+                    <div className="flex justify-between text-[11px] text-slate-500 pt-1 border-t border-slate-100">
+                      <span>Laba Penjualan (Internal)</span>
+                      <span className="font-mono-num font-semibold text-emerald-700">
+                        {formatRupiah(receipt.totalProfit)}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -2018,6 +2278,101 @@ export function PosPage({ products, categories, accounts, customers, storeSettin
               Selesai
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Modal Persetujuan Admin untuk Penjualan Stok Kedaluwarsa */}
+      {showExpiredOverrideModal && isAdmin && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleConfirmExpiredOverride}
+            className="bg-white border border-red-300 rounded-xl max-w-md w-full p-5 space-y-4 shadow-xl"
+          >
+            <div className="flex items-start justify-between gap-2 border-b border-red-100 pb-3">
+              <div className="flex items-start gap-2.5">
+                <div className="w-9 h-9 rounded-lg bg-red-100 text-red-700 flex items-center justify-center shrink-0">
+                  <ShieldAlert className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-display font-bold text-base text-red-900">
+                    Persetujuan Admin: Barang Kedaluwarsa
+                  </h3>
+                  <p className="text-xs text-red-700">
+                    Produk berikut menyentuh batch berstatus EXPIRED dan tidak boleh dijual tanpa persetujuan eksplisit Admin.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowExpiredOverrideModal(false)}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-500 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2 max-h-48 overflow-y-auto">
+              {expiredConflicts.map((c) => (
+                <div
+                  key={c.product.id}
+                  className="rounded-lg border border-red-200 bg-red-50/70 p-2.5 text-xs space-y-1"
+                >
+                  <div className="font-semibold text-red-950">
+                    {formatProductFullName(c.product)}
+                  </div>
+                  <div className="font-mono-num text-[11px] text-red-800">
+                    Dibeli {formatQty(c.demandedBase)} {c.product.unit} · Stok aman{' '}
+                    {formatQty(c.safeSellableStock)} {c.product.unit} ·{' '}
+                    <strong>Dari batch EXPIRED: {formatQty(c.expiredQtyNeeded)} {c.product.unit}</strong>
+                  </div>
+                  <div className="space-y-0.5 pt-0.5 text-[11px] text-red-700 font-mono-num">
+                    {c.expiredBatches.map((b) => (
+                      <div key={b.id}>
+                        • {b.batchNumber} · ED {formatShortIdDate(b.effectiveExpiryDate)} ({b.remainingLabel}) · Sisa {formatQty(b.remainingBaseQty)} {b.baseUnit}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="space-y-1">
+              <label
+                htmlFor="pos-expired-override-reason"
+                className="block text-xs font-semibold text-slate-800"
+              >
+                Alasan Persetujuan Admin *
+              </label>
+              <input
+                id="pos-expired-override-reason"
+                type="text"
+                required
+                minLength={3}
+                maxLength={200}
+                value={expiredOverrideReason}
+                onChange={(e) => setExpiredOverrideReason(e.target.value)}
+                placeholder="Contoh: Kemasan masih baik / obral cuci gudang disetujui pemilik"
+                className="w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-red-600"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowExpiredOverrideModal(false)}
+                className="min-h-[42px] px-4 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                Batalkan Transaksi
+              </button>
+              <button
+                type="submit"
+                disabled={processing || expiredOverrideReason.trim().length < 3}
+                className="min-h-[42px] px-4 py-2 rounded-lg bg-red-700 text-white text-xs font-semibold hover:bg-red-800 disabled:opacity-50 cursor-pointer"
+              >
+                {processing ? 'Memproses...' : 'Setujui & Lanjutkan Penjualan'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

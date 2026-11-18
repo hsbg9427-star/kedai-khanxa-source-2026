@@ -227,9 +227,13 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
 
       setFeedback({
         kind: 'ok',
-        text: `Transaksi PPOB ${result.transactionNumber} berhasil dicatat. Tagihan pelanggan: ${formatRupiah(
-          result.customerTotal
-        )}, Laba: ${formatRupiah(result.netProfit)}.`,
+        text: isAdmin
+          ? `Transaksi PPOB ${result.transactionNumber} berhasil dicatat. Tagihan pelanggan: ${formatRupiah(
+              result.customerTotal
+            )}, Laba: ${formatRupiah(result.netProfit)}.`
+          : `Transaksi PPOB ${result.transactionNumber} berhasil dicatat. Tagihan pelanggan: ${formatRupiah(
+              result.customerTotal
+            )}.`,
       });
       setTargetNumber('');
       setCustomerName('');
@@ -322,8 +326,8 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
         </div>
       </div>
 
-      {/* 4-Column Today KPI */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+      {/* Today KPI */}
+      <div className={`grid grid-cols-1 sm:grid-cols-2 ${isAdmin ? 'xl:grid-cols-4' : 'xl:grid-cols-2'} gap-4`}>
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
           <div className="text-xs text-slate-500">Transaksi PPOB Hari Ini</div>
           <div className="font-mono-num text-xl font-bold text-slate-900">
@@ -340,20 +344,24 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
           </div>
           <div className="text-[11px] text-slate-400">Harga jual + biaya admin</div>
         </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-          <div className="text-xs text-slate-500">Modal Deposit Terpakai</div>
-          <div className="font-mono-num text-xl font-bold text-slate-900">
-            {formatRupiah(todayStats.capitalTotal)}
-          </div>
-          <div className="text-[11px] text-slate-400">Terpotong dari akun deposit</div>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-          <div className="text-xs text-slate-500">Laba Bersih PPOB</div>
-          <div className="font-mono-num text-xl font-bold text-emerald-700">
-            {formatRupiah(todayStats.profitTotal)}
-          </div>
-          <div className="text-[11px] text-slate-400">Total bayar pelanggan - modal</div>
-        </div>
+        {isAdmin && (
+          <>
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
+              <div className="text-xs text-slate-500">Modal Deposit Terpakai</div>
+              <div className="font-mono-num text-xl font-bold text-slate-900">
+                {formatRupiah(todayStats.capitalTotal)}
+              </div>
+              <div className="text-[11px] text-slate-400">Terpotong dari akun deposit</div>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
+              <div className="text-xs text-slate-500">Laba Bersih PPOB</div>
+              <div className="font-mono-num text-xl font-bold text-emerald-700">
+                {formatRupiah(todayStats.profitTotal)}
+              </div>
+              <div className="text-[11px] text-slate-400">Total bayar pelanggan - modal</div>
+            </div>
+          </>
+        )}
       </div>
 
       {feedback && (
@@ -654,16 +662,18 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                     +{formatRupiah(previewBreakdown.customerTotal)}
                   </span>
                 </div>
-                <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
-                  <span className="font-semibold text-slate-800">Laba Bersih PPOB</span>
-                  <span
-                    className={`font-mono-num text-sm font-bold ${
-                      previewBreakdown.netProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
-                    }`}
-                  >
-                    {formatRupiah(previewBreakdown.netProfit)}
-                  </span>
-                </div>
+                {isAdmin && (
+                  <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
+                    <span className="font-semibold text-slate-800">Laba Bersih PPOB</span>
+                    <span
+                      className={`font-mono-num text-sm font-bold ${
+                        previewBreakdown.netProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
+                      }`}
+                    >
+                      {formatRupiah(previewBreakdown.netProfit)}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -685,8 +695,8 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                 Riwayat Transaksi PPOB
               </h3>
               <p className="text-xs text-slate-500">
-                Konfirmasi SN transaksi pending atau batalkan transaksi gagal untuk mengembalikan
-                saldo deposit.
+                Tersinkronisasi real-time Admin &amp; Kasir. Konfirmasi SN transaksi pending atau
+                batalkan transaksi gagal untuk mengembalikan saldo deposit.
               </p>
             </div>
 
@@ -734,8 +744,10 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                   <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
                     <th className="py-3 px-4 whitespace-nowrap">No. Trx &amp; Waktu</th>
                     <th className="py-3 px-4 whitespace-nowrap">Produk &amp; Tujuan</th>
-                    <th className="py-3 px-4 text-right whitespace-nowrap">Harga / Modal</th>
-                    <th className="py-3 px-4 text-right whitespace-nowrap">Laba</th>
+                    <th className="py-3 px-4 text-right whitespace-nowrap">
+                      {isAdmin ? 'Harga / Modal' : 'Tagihan'}
+                    </th>
+                    {isAdmin && <th className="py-3 px-4 text-right whitespace-nowrap">Laba</th>}
                     <th className="py-3 px-4 whitespace-nowrap">Status</th>
                     <th className="py-3 px-4 text-right whitespace-nowrap">Aksi</th>
                   </tr>
@@ -752,6 +764,9 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                           </div>
                           <div className="font-mono-num text-[11px] text-slate-500">
                             {tx.transactionDate} · {tx.transactionTime}
+                          </div>
+                          <div className="text-[11px] text-slate-500 truncate max-w-[160px]">
+                            Oleh: {tx.recordedByName}
                           </div>
                         </td>
                         <td className="py-3 px-4">
@@ -772,13 +787,17 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                           <div className="text-xs font-semibold text-slate-900">
                             {formatRupiah(totalTagihan)}
                           </div>
-                          <div className="text-[11px] text-slate-500">
-                            Modal {formatRupiah(tx.capitalPrice)}
-                          </div>
+                          {isAdmin && (
+                            <div className="text-[11px] text-slate-500">
+                              Modal {formatRupiah(tx.capitalPrice)}
+                            </div>
+                          )}
                         </td>
-                        <td className="py-3 px-4 text-right font-mono-num font-semibold text-emerald-700 whitespace-nowrap">
-                          {formatRupiah(tx.netProfit)}
-                        </td>
+                        {isAdmin && (
+                          <td className="py-3 px-4 text-right font-mono-num font-semibold text-emerald-700 whitespace-nowrap">
+                            {formatRupiah(tx.netProfit)}
+                          </td>
+                        )}
                         <td className="py-3 px-4 whitespace-nowrap">
                           {tx.status === 'completed' ? (
                             <span className="inline-block px-2 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-[11px] font-medium text-emerald-700">

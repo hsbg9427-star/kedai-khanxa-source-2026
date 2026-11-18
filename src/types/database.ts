@@ -123,6 +123,10 @@ export interface Product {
   sku: string;
   barcode?: string;
   name: string;
+  brand?: string;
+  variant?: string;
+  identityKey?: string;
+  barcodeKey?: string;
   photoDataUrl?: string;
   categoryId: string;
   categoryName: string;
@@ -252,6 +256,10 @@ export interface Sale extends TransactionMetadata {
   netReceivedAmount?: number;
   accountId?: string;
   qrisAccountId?: string;
+  expiredOverrideApproved?: boolean;
+  expiredOverrideByUid?: string;
+  expiredOverrideByName?: string;
+  expiredOverrideReason?: string;
   status: 'completed' | 'void';
   createdAt: Timestamp;
   updatedAt: Timestamp;
@@ -571,3 +579,100 @@ export interface FinancialSummary {
   updatedByUid: string;
   updatedAt: Timestamp;
 }
+
+export type StockBatchSourceType =
+  | 'purchase'
+  | 'initial_product'
+  | 'manual_stock'
+  | 'excel_import';
+
+export type StockBatchStatus = 'active' | 'depleted' | 'pulled' | 'handled';
+
+export interface StockBatch {
+  id: string;
+  batchNumber: string;
+  productId: string;
+  productName: string;
+  productBrand?: string;
+  productVariant?: string;
+  baseUnit: string;
+  sourceType: StockBatchSourceType;
+  sourceRefId?: string;
+  sourceNumber?: string;
+  supplierName?: string;
+  startDate: string; // YYYY-MM-DD (tanggal pembelian atau tanggal input stok)
+  estimatedExpiryDate: string; // YYYY-MM-DD (startDate + 6 bulan kalender)
+  actualExpiryDate?: string; // YYYY-MM-DD (prioritas jika diisi sesuai kemasan)
+  effectiveExpiryDate: string; // YYYY-MM-DD (actualExpiryDate || estimatedExpiryDate)
+  initialBaseQty: number;
+  remainingBaseQty: number;
+  costPerBaseUnit?: number;
+  status: StockBatchStatus;
+  handlingNotes?: string;
+  handledDate?: string;
+  handledByUid?: string;
+  handledByName?: string;
+  recordedByUid: string;
+  recordedByName: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface ProductIdentityLock {
+  id: string;
+  productId: string;
+  productName: string;
+  normalizedIdentity: string;
+  createdByUid: string;
+  createdAt: Timestamp;
+}
+
+export interface BarcodeLock {
+  id: string;
+  productId: string;
+  barcode: string;
+  normalizedBarcode: string;
+  createdByUid: string;
+  createdAt: Timestamp;
+}
+
+export type CashierClosingStatus = 'balance' | 'short' | 'over';
+export type CashierClosingReviewStatus = 'pending' | 'verified' | 'flagged';
+
+export interface CashierClosing extends TransactionMetadata {
+  id: string;
+  shiftLabel?: string;
+  periodStartDate: string; // YYYY-MM-DD
+  periodEndDate: string; // YYYY-MM-DD
+  openingCash: number;
+  totalSalesAmount: number;
+  retailTxCount: number;
+  retailCashIn: number;
+  retailQrisTotal: number;
+  retailTransferTotal: number;
+  retailDebtCreatedTotal: number;
+  miniAtmTxCount: number;
+  miniAtmCashIn: number;
+  miniAtmCashOut: number;
+  miniAtmNonCashTotal: number;
+  ppobTxCount: number;
+  ppobCashIn: number;
+  ppobNonCashTotal: number;
+  receivablePaymentCount: number;
+  receivableCashIn: number;
+  receivableNonCashIn: number;
+  expectedCash: number;
+  actualCash: number;
+  varianceAmount: number;
+  status: CashierClosingStatus;
+  notes?: string;
+  isFinalized: boolean;
+  reviewStatus: CashierClosingReviewStatus;
+  reviewedByUid?: string;
+  reviewedByName?: string;
+  reviewedAtDate?: string;
+  reviewNote?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+

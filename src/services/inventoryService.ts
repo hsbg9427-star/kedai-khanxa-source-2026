@@ -3,6 +3,7 @@ import {
   deleteDoc,
   deleteField,
   doc,
+  getDoc,
   getDocs,
   limit,
   onSnapshot,
@@ -25,8 +26,20 @@ import type {
   ProductSellUnit,
   Sale,
   SaleItem,
+  StockBatch,
   StockMovement,
 } from '../types/database';
+import { buildStockBatchDocument } from './batchService';
+import { planFefoBatchDeduction } from '../utils/expiryUtils';
+import {
+  DUPLICATE_PRODUCT_WARNING,
+  buildProductIdentityString,
+  checkDuplicateProduct,
+  computeBarcodeLockKey,
+  computeProductIdentityKey,
+  normalizeBarcode,
+  normalizeDisplayText,
+} from '../utils/productIdentity';
 import { handleFirestoreError, OperationType } from '../utils/firestoreError';
 import {
   createTransactionMetadata,
@@ -160,16 +173,75 @@ export function subscribeCategories(
   );
 }
 
+export class CategoryValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CategoryValidationError';
+  }
+}
+
+export function normalizeCategoryName(raw: string): string {
+  return raw.trim().replace(/\s+/g, ' ').slice(0, 60);
+}
+
+export function findDuplicateCategory(
+  rawName: string,
+  existingCategories: Pick<Category, 'id' | 'name'>[]
+): Pick<Category, 'id' | 'name'> | null {
+  const targetKey = normalizeCategoryName(rawName).toLowerCase();
+  if (!targetKey) return null;
+  return (
+    existingCategories.find(
+      (cat) => normalizeCategoryName(cat.name).toLowerCase() === targetKey
+    ) || null
+  );
+}
+
 export async function createCategory(
   name: string,
   description: string,
-  adminUid: string
+  adminUid: string,
+  existingCategories?: Pick<Category, 'id' | 'name'>[]
 ): Promise<string> {
+  const cleanName = normalizeCategoryName(name);
+  if (!cleanName) {
+    throw new CategoryValidationError('Nama kategori wajib diisi.');
+  }
+
+  if (existingCategories && existingCategories.length > 0) {
+    const localDup = findDuplicateCategory(cleanName, existingCategories);
+    if (localDup) {
+      throw new CategoryValidationError(
+        `Kategori "${localDup.name}" sudah terdaftar. Gunakan nama kategori lain.`
+      );
+    }
+  }
+
+  try {
+    const snap = await getDocs(collection(db, 'categories'));
+    const serverCategories = snap.docs.map((d) => ({
+      id: d.id,
+      name: String((d.data() as Partial<Category>).name || ''),
+    }));
+    const serverDup = findDuplicateCategory(cleanName, serverCategories);
+    if (serverDup) {
+      throw new CategoryValidationError(
+        `Kategori "${serverDup.name}" sudah terdaftar. Gunakan nama kategori lain.`
+      );
+    }
+  } catch (error) {
+    if (error instanceof CategoryValidationError) {
+      throw error;
+    }
+    // Jika offline dan cache belum lengkap, tetap lanjutkan pemeriksaan lokal yang sudah lolos
+  }
+
   const id = generateSafeId('cat');
+  const cleanDesc = description.trim().slice(0, 200);
   try {
     await setDoc(doc(db, 'categories', id), {
-      name: name.trim().slice(0, 60),
-      ...(description.trim() ? { description: description.trim().slice(0, 200) } : {}),
+      name: cleanName,
+      ...(cleanDesc ? { description: cleanDesc } : {}),
       createdByUid: adminUid,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -215,10 +287,24 @@ export function generateNextSku(products: Product[]): string {
   return `KK-${String(next).padStart(4, '0')}`;
 }
 
+export class DuplicateProductError extends Error {
+  existingProduct?: Product;
+  matchType?: 'identity' | 'barcode';
+
+  constructor(existingProduct?: Product, matchType?: 'identity' | 'barcode', message?: string) {
+    super(message || DUPLICATE_PRODUCT_WARNING);
+    this.name = 'DuplicateProductError';
+    this.existingProduct = existingProduct;
+    this.matchType = matchType;
+  }
+}
+
 export interface ProductPayload {
   sku: string;
   barcode?: string;
   name: string;
+  brand?: string;
+  variant?: string;
   photoDataUrl?: string;
   categoryId: string;
   categoryName: string;
@@ -233,6 +319,8 @@ export interface ProductPayload {
   stock: number;
   minStock: number;
   isActive: boolean;
+  initialExpiryStartDate?: string;
+  initialActualExpiryDate?: string;
 }
 
 function buildPriceSummary(
@@ -287,10 +375,131 @@ function buildPriceSummary(
   return (changes.join(' · ') || 'Pembaruan daftar harga & satuan').slice(0, 300);
 }
 
+async function verifyProductNotDuplicate(
+  candidate: { name: string; brand?: string; variant?: string; barcode?: string },
+  existingProducts?: Product[],
+  excludeProductId?: string
+): Promise<{
+  identityKey: string;
+  identityString: string;
+  normalizedBarcode?: string;
+  barcodeKey?: string;
+  identityLockChecked: boolean;
+  identityLockOwnedBySelf: boolean;
+  barcodeLockChecked: boolean;
+  barcodeLockOwnedBySelf: boolean;
+}> {
+  // 1. Pemeriksaan instan pada cache lokal (bekerja penuh saat offline maupun online)
+  const localCheck = checkDuplicateProduct(candidate, existingProducts || [], excludeProductId);
+  if (localCheck.isDuplicate) {
+    throw new DuplicateProductError(localCheck.existingProduct, localCheck.matchType);
+  }
+
+  let identityLockChecked = false;
+  let identityLockOwnedBySelf = false;
+  let barcodeLockChecked = false;
+  let barcodeLockOwnedBySelf = false;
+
+  // 2. Pemeriksaan ke server (dokumen lock + koleksi produk lama) bila perangkat online
+  if (typeof navigator === 'undefined' || navigator.onLine) {
+    try {
+      const idLockSnap = await getDoc(doc(db, 'product_identity_locks', localCheck.identityKey));
+      identityLockChecked = true;
+      if (idLockSnap.exists()) {
+        const lockData = idLockSnap.data() as { productId?: string };
+        if (lockData.productId && lockData.productId === excludeProductId) {
+          identityLockOwnedBySelf = true;
+        } else if (lockData.productId && lockData.productId !== excludeProductId) {
+          let existingProd = existingProducts?.find((p) => p.id === lockData.productId);
+          if (!existingProd) {
+            const prodSnap = await getDoc(doc(db, 'products', lockData.productId));
+            if (prodSnap.exists()) {
+              existingProd = { id: prodSnap.id, ...(prodSnap.data() as Omit<Product, 'id'>) };
+            }
+          }
+          if (existingProd) {
+            throw new DuplicateProductError(existingProd, 'identity');
+          }
+          await deleteDoc(doc(db, 'product_identity_locks', localCheck.identityKey));
+        }
+      }
+
+      if (localCheck.barcodeKey) {
+        const bcLockSnap = await getDoc(doc(db, 'barcode_locks', localCheck.barcodeKey));
+        barcodeLockChecked = true;
+        if (bcLockSnap.exists()) {
+          const lockData = bcLockSnap.data() as { productId?: string };
+          if (lockData.productId && lockData.productId === excludeProductId) {
+            barcodeLockOwnedBySelf = true;
+          } else if (lockData.productId && lockData.productId !== excludeProductId) {
+            let existingProd = existingProducts?.find((p) => p.id === lockData.productId);
+            if (!existingProd) {
+              const prodSnap = await getDoc(doc(db, 'products', lockData.productId));
+              if (prodSnap.exists()) {
+                existingProd = { id: prodSnap.id, ...(prodSnap.data() as Omit<Product, 'id'>) };
+              }
+            }
+            if (existingProd) {
+              throw new DuplicateProductError(existingProd, 'barcode');
+            }
+            await deleteDoc(doc(db, 'barcode_locks', localCheck.barcodeKey));
+          }
+        }
+      }
+
+      // Fallback untuk produk lama yang dibuat sebelum lock document diterapkan
+      const prodListSnap = await getDocs(collection(db, 'products'));
+      const serverProducts: Product[] = prodListSnap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<Product, 'id'>),
+      }));
+      const serverCheck = checkDuplicateProduct(candidate, serverProducts, excludeProductId);
+      if (serverCheck.isDuplicate) {
+        throw new DuplicateProductError(serverCheck.existingProduct, serverCheck.matchType);
+      }
+    } catch (err) {
+      if (err instanceof DuplicateProductError) {
+        throw err;
+      }
+      // Jika perangkat offline atau akses lock belum terpasang di environment uji, fallback ke validasi lokal
+    }
+  }
+
+  return {
+    identityKey: localCheck.identityKey,
+    identityString: localCheck.identityString,
+    normalizedBarcode: localCheck.normalizedBarcode,
+    barcodeKey: localCheck.barcodeKey,
+    identityLockChecked,
+    identityLockOwnedBySelf,
+    barcodeLockChecked,
+    barcodeLockOwnedBySelf,
+  };
+}
+
 export async function createProductWithInitialStock(
   payload: ProductPayload,
-  user: { uid: string; displayName: string }
+  user: { uid: string; displayName: string },
+  existingProducts?: Product[]
 ): Promise<string> {
+  const cleanName = normalizeDisplayText(payload.name).slice(0, 120);
+  if (!cleanName) {
+    throw new Error('Nama produk wajib diisi.');
+  }
+  const cleanBrand = normalizeDisplayText(payload.brand).slice(0, 60);
+  const cleanVariant = normalizeDisplayText(payload.variant).slice(0, 80);
+  const cleanBarcode = (payload.barcode || '').trim().slice(0, 64);
+
+  const dupMeta = await verifyProductNotDuplicate(
+    {
+      name: cleanName,
+      brand: cleanBrand,
+      variant: cleanVariant,
+      barcode: cleanBarcode,
+    },
+    existingProducts
+  );
+
   const baseUnit = payload.unit.trim().slice(0, 24) || 'PCS';
   const baseCanBuy = payload.baseCanBuy !== false;
   const baseCanSell = payload.baseCanSell !== false;
@@ -331,10 +540,34 @@ export async function createProductWithInitialStock(
 
   try {
     const batch = writeBatch(db);
+
+    // Kunci atomik untuk mencegah duplikasi lintas perangkat ketika sinkronisasi offline -> online
+    batch.set(doc(db, 'product_identity_locks', dupMeta.identityKey), {
+      productId,
+      productName: cleanName,
+      normalizedIdentity: dupMeta.identityString.slice(0, 240),
+      createdByUid: user.uid,
+      createdAt: serverTimestamp(),
+    });
+
+    if (dupMeta.barcodeKey && cleanBarcode) {
+      batch.set(doc(db, 'barcode_locks', dupMeta.barcodeKey), {
+        productId,
+        barcode: cleanBarcode,
+        normalizedBarcode: normalizeBarcode(cleanBarcode).slice(0, 64),
+        createdByUid: user.uid,
+        createdAt: serverTimestamp(),
+      });
+    }
+
     batch.set(productRef, {
       sku: payload.sku.trim().slice(0, 40),
-      ...(payload.barcode?.trim() ? { barcode: payload.barcode.trim().slice(0, 64) } : {}),
-      name: payload.name.trim().slice(0, 120),
+      ...(cleanBarcode ? { barcode: cleanBarcode } : {}),
+      name: cleanName,
+      ...(cleanBrand ? { brand: cleanBrand } : {}),
+      ...(cleanVariant ? { variant: cleanVariant } : {}),
+      identityKey: dupMeta.identityKey,
+      ...(dupMeta.barcodeKey ? { barcodeKey: dupMeta.barcodeKey } : {}),
       ...(payload.photoDataUrl ? { photoDataUrl: payload.photoDataUrl.slice(0, 80000) } : {}),
       categoryId: payload.categoryId,
       categoryName: payload.categoryName.trim().slice(0, 60),
@@ -359,7 +592,7 @@ export async function createProductWithInitialStock(
     batch.set(doc(db, 'price_history', priceId), {
       ...priceMeta,
       productId,
-      productName: payload.name.trim().slice(0, 120),
+      productName: cleanName,
       baseUnit,
       changeType: 'initial',
       costPriceBefore: 0,
@@ -378,13 +611,31 @@ export async function createProductWithInitialStock(
       createdAt: serverTimestamp(),
     });
 
-    if (initialStock !== 0) {
+    if (initialStock > 0) {
       const moveId = generateSafeId('stk');
       const meta = createTransactionMetadata('STK', user);
+      const startDate = payload.initialExpiryStartDate || meta.transactionDate;
+      const batchDoc = buildStockBatchDocument({
+        productId,
+        productName: cleanName,
+        productBrand: cleanBrand || undefined,
+        productVariant: cleanVariant || undefined,
+        baseUnit,
+        sourceType: 'initial_product',
+        sourceRefId: moveId,
+        sourceNumber: meta.transactionNumber,
+        startDate,
+        actualExpiryDate: payload.initialActualExpiryDate,
+        initialBaseQty: initialStock,
+        costPerBaseUnit: cleanCost,
+        user,
+      });
+      batch.set(doc(db, 'stock_batches', batchDoc.id), batchDoc.data);
+
       batch.set(doc(db, 'stock_movements', moveId), {
         ...meta,
         productId,
-        productName: payload.name.trim().slice(0, 120),
+        productName: cleanName,
         baseUnit,
         unitName: baseUnit,
         unitQuantity: initialStock,
@@ -393,6 +644,7 @@ export async function createProductWithInitialStock(
         quantity: initialStock,
         stockBefore: 0,
         stockAfter: initialStock,
+        referenceId: batchDoc.id,
         notes: `Stok awal produk baru (${formatQty(initialStock)} ${baseUnit})`,
         createdAt: serverTimestamp(),
       });
@@ -401,6 +653,28 @@ export async function createProductWithInitialStock(
     await batch.commit();
     return productId;
   } catch (error) {
+    const code = (error as { code?: string })?.code || '';
+    const msg = error instanceof Error ? error.message : String(error);
+    if (
+      (code === 'permission-denied' || msg.includes('Missing or insufficient permissions')) &&
+      (typeof navigator === 'undefined' || navigator.onLine)
+    ) {
+      // Periksa apakah kegagalan disebabkan oleh tabrakan kunci identitas saat sinkronisasi multi-perangkat
+      try {
+        const existingIdLock = await getDoc(doc(db, 'product_identity_locks', dupMeta.identityKey));
+        if (existingIdLock.exists()) {
+          throw new DuplicateProductError(undefined, 'identity');
+        }
+        if (dupMeta.barcodeKey) {
+          const existingBcLock = await getDoc(doc(db, 'barcode_locks', dupMeta.barcodeKey));
+          if (existingBcLock.exists()) {
+            throw new DuplicateProductError(undefined, 'barcode');
+          }
+        }
+      } catch (innerErr) {
+        if (innerErr instanceof DuplicateProductError) throw innerErr;
+      }
+    }
     handleFirestoreError(error, OperationType.CREATE, `products/${productId}`);
   }
 }
@@ -408,8 +682,28 @@ export async function createProductWithInitialStock(
 export async function updateProductDetails(
   prevProduct: Product,
   payload: Omit<ProductPayload, 'stock'>,
-  user: { uid: string; displayName: string }
+  user: { uid: string; displayName: string },
+  existingProducts?: Product[]
 ): Promise<void> {
+  const cleanName = normalizeDisplayText(payload.name).slice(0, 120);
+  if (!cleanName) {
+    throw new Error('Nama produk wajib diisi.');
+  }
+  const cleanBrand = normalizeDisplayText(payload.brand).slice(0, 60);
+  const cleanVariant = normalizeDisplayText(payload.variant).slice(0, 80);
+  const cleanBarcode = (payload.barcode || '').trim().slice(0, 64);
+
+  const dupMeta = await verifyProductNotDuplicate(
+    {
+      name: cleanName,
+      brand: cleanBrand,
+      variant: cleanVariant,
+      barcode: cleanBarcode,
+    },
+    existingProducts,
+    prevProduct.id
+  );
+
   const baseUnit = payload.unit.trim().slice(0, 24) || 'PCS';
   const baseCanBuy = payload.baseCanBuy !== false;
   const baseCanSell = payload.baseCanSell !== false;
@@ -450,12 +744,19 @@ export async function updateProductDetails(
     (prevProduct.baseCanSell !== false) !== baseCanSell ||
     JSON.stringify(prevProduct.sellUnits || []) !== JSON.stringify(cleanSellUnits);
 
+  const prevIdentityKey =
+    prevProduct.identityKey ||
+    computeProductIdentityKey(prevProduct.name, prevProduct.brand, prevProduct.variant);
+  const prevBarcodeKey =
+    prevProduct.barcodeKey || computeBarcodeLockKey(prevProduct.barcode);
+
   try {
     const batch = writeBatch(db);
     const updatedFields: Record<string, unknown> = {
       sku: payload.sku.trim().slice(0, 40),
-      barcode: (payload.barcode || '').trim().slice(0, 64),
-      name: payload.name.trim().slice(0, 120),
+      barcode: cleanBarcode,
+      name: cleanName,
+      identityKey: dupMeta.identityKey,
       photoDataUrl: payload.photoDataUrl ? payload.photoDataUrl.slice(0, 80000) : '',
       categoryId: payload.categoryId,
       categoryName: payload.categoryName.trim().slice(0, 60),
@@ -467,6 +768,24 @@ export async function updateProductDetails(
       isActive: Boolean(payload.isActive),
       updatedAt: serverTimestamp(),
     };
+
+    if (cleanBrand) {
+      updatedFields.brand = cleanBrand;
+    } else if (prevProduct.brand !== undefined) {
+      updatedFields.brand = deleteField();
+    }
+
+    if (cleanVariant) {
+      updatedFields.variant = cleanVariant;
+    } else if (prevProduct.variant !== undefined) {
+      updatedFields.variant = deleteField();
+    }
+
+    if (dupMeta.barcodeKey) {
+      updatedFields.barcodeKey = dupMeta.barcodeKey;
+    } else if (prevProduct.barcodeKey !== undefined) {
+      updatedFields.barcodeKey = deleteField();
+    }
 
     if (baseCanBuy === false) {
       updatedFields.baseCanBuy = false;
@@ -494,13 +813,47 @@ export async function updateProductDetails(
 
     batch.update(ref, updatedFields);
 
+    if (prevIdentityKey && prevIdentityKey !== dupMeta.identityKey) {
+      batch.delete(doc(db, 'product_identity_locks', prevIdentityKey));
+    }
+    const shouldCreateIdentityLock = dupMeta.identityLockChecked
+      ? !dupMeta.identityLockOwnedBySelf
+      : prevIdentityKey !== dupMeta.identityKey || !prevProduct.identityKey;
+    if (shouldCreateIdentityLock) {
+      batch.set(doc(db, 'product_identity_locks', dupMeta.identityKey), {
+        productId: prevProduct.id,
+        productName: cleanName,
+        normalizedIdentity: dupMeta.identityString.slice(0, 240),
+        createdByUid: user.uid,
+        createdAt: serverTimestamp(),
+      });
+    }
+
+    if (prevBarcodeKey && prevBarcodeKey !== dupMeta.barcodeKey) {
+      batch.delete(doc(db, 'barcode_locks', prevBarcodeKey));
+    }
+    const shouldCreateBarcodeLock =
+      Boolean(dupMeta.barcodeKey && cleanBarcode) &&
+      (dupMeta.barcodeLockChecked
+        ? !dupMeta.barcodeLockOwnedBySelf
+        : prevBarcodeKey !== dupMeta.barcodeKey || !prevProduct.barcodeKey);
+    if (shouldCreateBarcodeLock && dupMeta.barcodeKey) {
+      batch.set(doc(db, 'barcode_locks', dupMeta.barcodeKey), {
+        productId: prevProduct.id,
+        barcode: cleanBarcode,
+        normalizedBarcode: normalizeBarcode(cleanBarcode).slice(0, 64),
+        createdByUid: user.uid,
+        createdAt: serverTimestamp(),
+      });
+    }
+
     if (priceOrUnitChanged) {
       const priceId = generateSafeId('prc');
       const priceMeta = createTransactionMetadata('PRC', user);
       batch.set(doc(db, 'price_history', priceId), {
         ...priceMeta,
         productId: prevProduct.id,
-        productName: payload.name.trim().slice(0, 120),
+        productName: cleanName,
         baseUnit,
         changeType: 'update',
         costPriceBefore: Number(prevProduct.costPrice) || 0,
@@ -526,6 +879,33 @@ export async function updateProductDetails(
 
     await batch.commit();
   } catch (error) {
+    const code = (error as { code?: string })?.code || '';
+    const msg = error instanceof Error ? error.message : String(error);
+    if (
+      (code === 'permission-denied' || msg.includes('Missing or insufficient permissions')) &&
+      (typeof navigator === 'undefined' || navigator.onLine)
+    ) {
+      try {
+        const existingIdLock = await getDoc(doc(db, 'product_identity_locks', dupMeta.identityKey));
+        if (existingIdLock.exists()) {
+          const lockPid = (existingIdLock.data() as { productId?: string })?.productId;
+          if (lockPid && lockPid !== prevProduct.id) {
+            throw new DuplicateProductError(undefined, 'identity');
+          }
+        }
+        if (dupMeta.barcodeKey) {
+          const existingBcLock = await getDoc(doc(db, 'barcode_locks', dupMeta.barcodeKey));
+          if (existingBcLock.exists()) {
+            const lockPid = (existingBcLock.data() as { productId?: string })?.productId;
+            if (lockPid && lockPid !== prevProduct.id) {
+              throw new DuplicateProductError(undefined, 'barcode');
+            }
+          }
+        }
+      } catch (innerErr) {
+        if (innerErr instanceof DuplicateProductError) throw innerErr;
+      }
+    }
     handleFirestoreError(error, OperationType.UPDATE, `products/${prevProduct.id}`);
   }
 }
@@ -551,9 +931,23 @@ export async function getUsedUnitNamesForProduct(productId: string): Promise<Set
   return used;
 }
 
-export async function deleteProduct(productId: string): Promise<void> {
+export async function deleteProduct(productId: string, prevProduct?: Product): Promise<void> {
   try {
-    await deleteDoc(doc(db, 'products', productId));
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'products', productId));
+    const idKey =
+      prevProduct?.identityKey ||
+      (prevProduct
+        ? computeProductIdentityKey(prevProduct.name, prevProduct.brand, prevProduct.variant)
+        : undefined);
+    const bcKey = prevProduct?.barcodeKey || computeBarcodeLockKey(prevProduct?.barcode);
+    if (idKey) {
+      batch.delete(doc(db, 'product_identity_locks', idKey));
+    }
+    if (bcKey) {
+      batch.delete(doc(db, 'barcode_locks', bcKey));
+    }
+    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `products/${productId}`);
   }
@@ -565,7 +959,12 @@ export async function adjustProductStock(
   inputQty: number,
   notes: string,
   user: { uid: string; displayName: string },
-  unitName?: string
+  unitName?: string,
+  batchOptions?: {
+    startDate?: string;
+    actualExpiryDate?: string;
+    targetBatch?: StockBatch | null;
+  }
 ): Promise<void> {
   const options = getProductAllUnitOptions(product);
   const selectedOpt =
@@ -595,6 +994,39 @@ export async function adjustProductStock(
       stock: stockAfter,
       updatedAt: serverTimestamp(),
     });
+
+    let referenceId: string | undefined;
+    if (mode === 'in' && convertedBaseQty > 0) {
+      const startDate = batchOptions?.startDate || meta.transactionDate;
+      const batchDoc = buildStockBatchDocument({
+        productId: product.id,
+        productName: product.name,
+        productBrand: product.brand,
+        productVariant: product.variant,
+        baseUnit: product.unit,
+        sourceType: 'manual_stock',
+        sourceRefId: moveId,
+        sourceNumber: meta.transactionNumber,
+        startDate,
+        actualExpiryDate: batchOptions?.actualExpiryDate,
+        initialBaseQty: convertedBaseQty,
+        costPerBaseUnit: product.costPrice,
+        user,
+      });
+      referenceId = batchDoc.id;
+      batch.set(doc(db, 'stock_batches', batchDoc.id), batchDoc.data);
+    } else if (mode === 'out' && batchOptions?.targetBatch && convertedBaseQty > 0) {
+      const tb = batchOptions.targetBatch;
+      const prevRem = Math.max(0, roundQty(Number(tb.remainingBaseQty) || 0));
+      const nextRem = roundQty(Math.max(0, prevRem - convertedBaseQty));
+      referenceId = tb.id;
+      batch.update(doc(db, 'stock_batches', tb.id), {
+        remainingBaseQty: nextRem <= 0.0001 ? 0 : nextRem,
+        status: nextRem <= 0.0001 ? 'depleted' : tb.status,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
     batch.set(doc(db, 'stock_movements', moveId), {
       ...meta,
       productId: product.id,
@@ -607,6 +1039,7 @@ export async function adjustProductStock(
       quantity: loggedBaseQuantity,
       stockBefore,
       stockAfter,
+      ...(referenceId ? { referenceId } : {}),
       notes: (
         notes.trim() ||
         (mode === 'in'
@@ -625,11 +1058,53 @@ export async function adjustProductStock(
 
 export async function importProductsBatch(
   rows: ImportedProductRow[],
-  user: { uid: string; displayName: string }
+  user: { uid: string; displayName: string },
+  existingProducts: Product[] = []
 ): Promise<number> {
+  // Validasi duplikasi di dalam file & terhadap produk terdaftar sebelum menulis
+  const seenIdentityKeys = new Set<string>();
+  const seenBarcodeKeys = new Set<string>();
+
+  for (const row of rows) {
+    const check = checkDuplicateProduct(
+      {
+        name: row.name,
+        brand: row.brand,
+        variant: row.variant,
+        barcode: row.barcode,
+      },
+      existingProducts
+    );
+    if (check.isDuplicate) {
+      throw new DuplicateProductError(
+        check.existingProduct,
+        check.matchType,
+        `${DUPLICATE_PRODUCT_WARNING} (${row.name})`
+      );
+    }
+    if (seenIdentityKeys.has(check.identityKey)) {
+      throw new DuplicateProductError(
+        undefined,
+        'identity',
+        `${DUPLICATE_PRODUCT_WARNING} (Duplikat pada baris impor: ${row.name})`
+      );
+    }
+    seenIdentityKeys.add(check.identityKey);
+    if (check.barcodeKey) {
+      if (seenBarcodeKeys.has(check.barcodeKey)) {
+        throw new DuplicateProductError(
+          undefined,
+          'barcode',
+          `${DUPLICATE_PRODUCT_WARNING} (Barcode ganda pada file impor: ${row.barcode})`
+        );
+      }
+      seenBarcodeKeys.add(check.barcodeKey);
+    }
+  }
+
   let importedCount = 0;
-  // Maksimal 100 produk per batch (100 produk + 100 price_history + hingga 100 stock_movements <= 300 ops)
-  const CHUNK_SIZE = 100;
+  // Maksimal 65 produk per batch (<= 6 write/produk = max 390 ops, aman di bawah batas 500 Firestore)
+  const CHUNK_SIZE = 65;
 
   try {
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
@@ -640,11 +1115,40 @@ export async function importProductsBatch(
         const productId = generateSafeId('prd');
         const cleanStock = Math.max(0, Number(row.stock) || 0);
         const cleanSellUnits = sanitizeSellUnits(row.sellUnits, row.unit);
+        const cleanName = normalizeDisplayText(row.name).slice(0, 120);
+        const cleanBrand = normalizeDisplayText(row.brand).slice(0, 60);
+        const cleanVariant = normalizeDisplayText(row.variant).slice(0, 80);
+        const cleanBarcode = (row.barcode || '').trim().slice(0, 64);
+        const identityString = buildProductIdentityString(cleanName, cleanBrand, cleanVariant);
+        const identityKey = computeProductIdentityKey(cleanName, cleanBrand, cleanVariant);
+        const barcodeKey = computeBarcodeLockKey(cleanBarcode);
+
+        batch.set(doc(db, 'product_identity_locks', identityKey), {
+          productId,
+          productName: cleanName,
+          normalizedIdentity: identityString.slice(0, 240),
+          createdByUid: user.uid,
+          createdAt: serverTimestamp(),
+        });
+
+        if (barcodeKey && cleanBarcode) {
+          batch.set(doc(db, 'barcode_locks', barcodeKey), {
+            productId,
+            barcode: cleanBarcode,
+            normalizedBarcode: normalizeBarcode(cleanBarcode).slice(0, 64),
+            createdByUid: user.uid,
+            createdAt: serverTimestamp(),
+          });
+        }
 
         batch.set(doc(db, 'products', productId), {
           sku: row.sku,
-          ...(row.barcode ? { barcode: row.barcode } : {}),
-          name: row.name,
+          ...(cleanBarcode ? { barcode: cleanBarcode } : {}),
+          name: cleanName,
+          ...(cleanBrand ? { brand: cleanBrand } : {}),
+          ...(cleanVariant ? { variant: cleanVariant } : {}),
+          identityKey,
+          ...(barcodeKey ? { barcodeKey } : {}),
           categoryId: row.categoryId,
           categoryName: row.categoryName,
           unit: row.unit,
@@ -666,7 +1170,7 @@ export async function importProductsBatch(
         batch.set(doc(db, 'price_history', priceId), {
           ...priceMeta,
           productId,
-          productName: row.name,
+          productName: cleanName,
           baseUnit: row.unit,
           changeType: 'initial',
           costPriceBefore: 0,
@@ -680,13 +1184,30 @@ export async function importProductsBatch(
           createdAt: serverTimestamp(),
         });
 
-        if (cleanStock !== 0) {
+        if (cleanStock > 0) {
           const moveId = generateSafeId('stk');
           const meta = createTransactionMetadata('IMP', user);
+          const batchDoc = buildStockBatchDocument({
+            productId,
+            productName: cleanName,
+            productBrand: cleanBrand || undefined,
+            productVariant: cleanVariant || undefined,
+            baseUnit: row.unit,
+            sourceType: 'excel_import',
+            sourceRefId: moveId,
+            sourceNumber: meta.transactionNumber,
+            startDate: meta.transactionDate,
+            actualExpiryDate: row.actualExpiryDate,
+            initialBaseQty: cleanStock,
+            costPerBaseUnit: row.costPrice,
+            user,
+          });
+          batch.set(doc(db, 'stock_batches', batchDoc.id), batchDoc.data);
+
           batch.set(doc(db, 'stock_movements', moveId), {
             ...meta,
             productId,
-            productName: row.name,
+            productName: cleanName,
             baseUnit: row.unit,
             unitName: row.unit,
             unitQuantity: cleanStock,
@@ -695,6 +1216,7 @@ export async function importProductsBatch(
             quantity: cleanStock,
             stockBefore: 0,
             stockAfter: cleanStock,
+            referenceId: batchDoc.id,
             notes: `Import Excel (${cleanStock} ${row.unit})`,
             createdAt: serverTimestamp(),
           });
@@ -717,8 +1239,8 @@ export function subscribeStockMovements(
   onError: (err: unknown) => void
 ): Unsubscribe {
   const q = isAdmin
-    ? query(collection(db, 'stock_movements'))
-    : query(collection(db, 'stock_movements'), where('recordedByUid', '==', userUid));
+    ? query(collection(db, 'stock_movements'), orderBy('createdAt', 'desc'), limit(200))
+    : query(collection(db, 'stock_movements'), where('recordedByUid', '==', userUid), limit(100));
 
   return onSnapshot(
     q,
@@ -744,13 +1266,15 @@ export function subscribeStockMovements(
 
 export function subscribePriceHistory(
   isAdmin: boolean,
-  userUid: string,
+  _userUid: string,
   onData: (history: PriceHistory[]) => void,
   onError: (err: unknown) => void
 ): Unsubscribe {
-  const q = isAdmin
-    ? query(collection(db, 'price_history'))
-    : query(collection(db, 'price_history'), where('recordedByUid', '==', userUid));
+  if (!isAdmin) {
+    onData([]);
+    return () => {};
+  }
+  const q = query(collection(db, 'price_history'), orderBy('createdAt', 'desc'), limit(200));
 
   return onSnapshot(
     q,
@@ -795,6 +1319,9 @@ export interface RecordRetailSaleInput {
   qrisAccount?: Account | null;
   customer?: Customer | null;
   customerName?: string;
+  batches?: StockBatch[];
+  allowExpiredOverride?: boolean;
+  expiredOverrideReason?: string;
 }
 
 export interface RecordedSaleReceipt {
@@ -860,6 +1387,27 @@ export async function recordRetailSale(
     throw new Error('Pilih pelanggan terdaftar terlebih dahulu untuk transaksi Kasbon / Piutang.');
   }
 
+  // Validasi awal batch kedaluwarsa & susun rencana pemotongan FEFO
+  const allBatches = input.batches || [];
+  const allowExpired = Boolean(input.allowExpiredOverride);
+  const initialFefoPlans = new Map<string, ReturnType<typeof planFefoBatchDeduction>>();
+  let usedExpiredInSale = false;
+
+  if (allBatches.length > 0) {
+    for (const [productId, { product, totalBaseQty }] of baseDemandByProduct.entries()) {
+      const plan = planFefoBatchDeduction(product, allBatches, totalBaseQty, allowExpired);
+      if (!plan.ok && plan.blockedByExpired) {
+        throw new Error(
+          `Produk "${product.name}" memiliki stok sudah kedaluwarsa (EXPIRED) dan tidak boleh dijual tanpa persetujuan Admin.`
+        );
+      }
+      if (plan.usedExpiredBatches) {
+        usedExpiredInSale = true;
+      }
+      initialFefoPlans.set(productId, plan);
+    }
+  }
+
   const settlement = calculateSaleSettlement({
     totalAmount,
     paymentMethod: input.paymentMethod,
@@ -893,8 +1441,9 @@ export async function recordRetailSale(
   const effectiveCustomerName = (input.customer?.name || input.customerName || '')
     .trim()
     .slice(0, 100);
+  const cleanOverrideReason = (input.expiredOverrideReason || '').trim().slice(0, 200);
 
-  const buildSaleDocPayload = () => ({
+  const buildSaleDocPayload = (usedExpiredFlag: boolean) => ({
     ...meta,
     ...(input.customer ? { customerId: input.customer.id } : {}),
     ...(effectiveCustomerName ? { customerName: effectiveCustomerName } : {}),
@@ -916,6 +1465,14 @@ export async function recordRetailSale(
     ...(cashAccount && settlement.cashDepositAmount > 0 ? { accountId: cashAccount.id } : {}),
     ...(qrisTargetAccount && settlement.qrisAmount > 0
       ? { qrisAccountId: qrisTargetAccount.id }
+      : {}),
+    ...(allowExpired && usedExpiredFlag
+      ? {
+          expiredOverrideApproved: true,
+          expiredOverrideByUid: user.uid,
+          expiredOverrideByName: user.displayName.trim().slice(0, 100) || 'Admin',
+          ...(cleanOverrideReason ? { expiredOverrideReason: cleanOverrideReason } : {}),
+        }
       : {}),
     status: 'completed',
     createdAt: serverTimestamp(),
@@ -1043,7 +1600,7 @@ export async function recordRetailSale(
 
   const executeOfflineBatch = async () => {
     const batch = writeBatch(db);
-    batch.set(doc(db, 'sales', saleId), buildSaleDocPayload());
+    batch.set(doc(db, 'sales', saleId), buildSaleDocPayload(usedExpiredInSale));
 
     const runningStockMap = new Map<string, number>();
     for (const { product } of baseDemandByProduct.values()) {
@@ -1115,6 +1672,16 @@ export async function recordRetailSale(
       });
     }
 
+    for (const plan of initialFefoPlans.values()) {
+      for (const alloc of plan.allocations) {
+        batch.update(doc(db, 'stock_batches', alloc.batchId), {
+          remainingBaseQty: alloc.remainingAfter,
+          status: alloc.nextStatus,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+
     applyAccountDeposits(batch, cashAccount, qrisTargetAccount);
 
     if (isDebtSale && input.customer && settlement.debtAmount > 0) {
@@ -1161,6 +1728,23 @@ export async function recordRetailSale(
             productEntries.map(({ product }) => tx.get(doc(db, 'products', product.id)))
           );
 
+          // Baca dokumen batch aktif yang terlibat secara atomik sebelum penulisan
+          const relevantBatchIds = Array.from(
+            new Set(
+              allBatches
+                .filter(
+                  (b) =>
+                    baseDemandByProduct.has(b.productId) &&
+                    b.status === 'active' &&
+                    Number(b.remainingBaseQty) > 0.00001
+                )
+                .map((b) => b.id)
+            )
+          );
+          const batchSnaps = await Promise.all(
+            relevantBatchIds.map((id) => tx.get(doc(db, 'stock_batches', id)))
+          );
+
           const uniqueAccIds = new Set<string>();
           if (cashAccount && settlement.cashDepositAmount > 0) uniqueAccIds.add(cashAccount.id);
           if (qrisTargetAccount && settlement.qrisNetDepositAmount > 0) {
@@ -1176,11 +1760,24 @@ export async function recordRetailSale(
               ? await tx.get(doc(db, 'customers', input.customer.id))
               : null;
 
-          // Validate live stock
+          // Validate live stock & live batch expiry
+          const liveBatches: StockBatch[] = [];
+          batchSnaps.forEach((snap) => {
+            if (snap.exists()) {
+              liveBatches.push({ id: snap.id, ...(snap.data() as Omit<StockBatch, 'id'>) });
+            }
+          });
+
           const runningStockMap = new Map<string, number>();
+          const liveFefoPlans: ReturnType<typeof planFefoBatchDeduction>[] = [];
+          let liveUsedExpired = false;
+
           productEntries.forEach(({ product, totalBaseQty }, idx) => {
             const pSnap = productSnaps[idx];
-            const liveProdData = pSnap.exists() ? (pSnap.data() as Product) : product;
+            if (!pSnap.exists()) {
+              throw new Error(`Produk "${product.name}" tidak ditemukan atau telah dihapus oleh Admin.`);
+            }
+            const liveProdData = pSnap.data() as Product;
             const liveStock = snapStockToProductPrecision(
               Number(liveProdData.stock) || 0,
               liveProdData
@@ -1191,6 +1788,24 @@ export async function recordRetailSale(
               );
             }
             runningStockMap.set(product.id, liveStock);
+
+            if (liveBatches.length > 0) {
+              const plan = planFefoBatchDeduction(
+                { id: product.id, stock: liveStock },
+                liveBatches,
+                totalBaseQty,
+                allowExpired
+              );
+              if (!plan.ok && plan.blockedByExpired) {
+                throw new Error(
+                  `Produk "${product.name}" memiliki stok sudah kedaluwarsa (EXPIRED) dan tidak boleh dijual tanpa persetujuan Admin.`
+                );
+              }
+              if (plan.usedExpiredBatches) {
+                liveUsedExpired = true;
+              }
+              liveFefoPlans.push(plan);
+            }
           });
 
           const liveAccMap = new Map<string, Account>();
@@ -1203,7 +1818,7 @@ export async function recordRetailSale(
           });
 
           // Execute atomic writes
-          tx.set(doc(db, 'sales', saleId), buildSaleDocPayload());
+          tx.set(doc(db, 'sales', saleId), buildSaleDocPayload(liveUsedExpired));
 
           resolvedLines.forEach(({ item, resolved }, idx) => {
             const itemId = generateSafeId(`itm${idx}`);
@@ -1265,6 +1880,16 @@ export async function recordRetailSale(
               stock: finalStock,
               updatedAt: serverTimestamp(),
             });
+          }
+
+          for (const plan of liveFefoPlans) {
+            for (const alloc of plan.allocations) {
+              tx.update(doc(db, 'stock_batches', alloc.batchId), {
+                remainingBaseQty: alloc.remainingAfter,
+                status: alloc.nextStatus,
+                updatedAt: serverTimestamp(),
+              });
+            }
           }
 
           applyAccountDeposits(
@@ -1368,12 +1993,8 @@ export function subscribeRecentSales(
   onError: (err: unknown) => void
 ): Unsubscribe {
   const q = isAdmin
-    ? query(collection(db, 'sales'), orderBy('createdAt', 'desc'), limit(30))
-    : query(
-        collection(db, 'sales'),
-        where('transactionDate', '==', getTodayDateString()),
-        where('recordedByUid', '==', userUid)
-      );
+    ? query(collection(db, 'sales'), orderBy('createdAt', 'desc'), limit(50))
+    : query(collection(db, 'sales'), where('recordedByUid', '==', userUid), limit(50));
 
   return onSnapshot(
     q,
@@ -1399,14 +2020,16 @@ export function subscribeRecentSales(
 
 export async function fetchSaleReceiptFromSale(
   sale: Sale,
-  isAdmin: boolean,
-  userUid: string,
+  _isAdmin: boolean,
+  _userUid: string,
   customers: Customer[]
 ): Promise<RecordedSaleReceipt> {
   const itemsPath = `sales/${sale.id}/items`;
   try {
     const itemsRef = collection(db, 'sales', sale.id, 'items');
-    const q = isAdmin ? query(itemsRef) : query(itemsRef, where('recordedByUid', '==', userUid));
+    const q = _isAdmin
+      ? query(itemsRef)
+      : query(itemsRef, where('recordedByUid', '==', _userUid));
     const snap = await getDocs(q);
     const saleItems: SaleItem[] = snap.docs.map((d) => ({
       id: d.id,

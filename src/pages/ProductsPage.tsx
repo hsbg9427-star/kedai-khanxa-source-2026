@@ -18,6 +18,7 @@ import {
   ArrowUpDown,
   History,
   Layers,
+  Calendar,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
@@ -26,6 +27,7 @@ import type {
   PriceHistory,
   Product,
   ProductSellUnit,
+  StockBatch,
   StockMovement,
 } from '../types/database';
 import {
@@ -35,6 +37,7 @@ import {
   createCategory,
   createProductWithInitialStock,
   deleteProduct,
+  DuplicateProductError,
   formatProductStockSummary,
   formatUnitConversionLabel,
   generateNextSku,
@@ -51,7 +54,8 @@ import {
   updateProductDetails,
   type UniversalUnitTemplate,
 } from '../services/inventoryService';
-import { formatQty, formatRupiah } from '../utils/formatters';
+import { updateBatchActualExpiry } from '../services/batchService';
+import { formatQty, formatRupiah, getTodayDateString } from '../utils/formatters';
 import { getReadableFirestoreError } from '../utils/firestoreError';
 import { compressImageFile } from '../utils/imageHelper';
 import {
@@ -60,12 +64,25 @@ import {
   parseProductsExcelFile,
   type ImportedProductRow,
 } from '../utils/excelProducts';
+import {
+  computeEstimatedExpiryDate,
+  EXPIRY_ESTIMATE_DISCLAIMER,
+  formatShortIdDate,
+  summarizeProductBatches,
+  type ProductBatchSummary,
+} from '../utils/expiryUtils';
+import {
+  checkDuplicateProduct,
+  DUPLICATE_PRODUCT_WARNING,
+  formatProductFullName,
+} from '../utils/productIdentity';
 import { BarcodeScannerModal } from '../components/BarcodeScannerModal';
 import { CameraCaptureModal } from '../components/CameraCaptureModal';
 
 interface ProductsPageProps {
   products: Product[];
   categories: Category[];
+  stockBatches?: StockBatch[];
   loading: boolean;
   hasPendingWrites: boolean;
   storeName: string;
@@ -109,6 +126,7 @@ function makeEmptySellUnitDraft(defaultPreset = 'DUS'): SellUnitDraft {
 export function ProductsPage({
   products,
   categories,
+  stockBatches = [],
   loading,
   hasPendingWrites,
   storeName,
@@ -135,6 +153,8 @@ export function ProductsPage({
   const [sku, setSku] = useState('');
   const [barcode, setBarcode] = useState('');
   const [name, setName] = useState('');
+  const [brand, setBrand] = useState('');
+  const [variant, setVariant] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [unit, setUnit] = useState('PCS');
   const [customUnit, setCustomUnit] = useState('');
@@ -149,6 +169,12 @@ export function ProductsPage({
   const [loadingUsedUnits, setLoadingUsedUnits] = useState(false);
   const [stock, setStock] = useState('0');
   const [minStock, setMinStock] = useState('5');
+  const [initialExpiryStartDate, setInitialExpiryStartDate] = useState(getTodayDateString());
+  const [initialActualExpiryDate, setInitialActualExpiryDate] = useState('');
+  const [duplicateConflict, setDuplicateConflict] = useState<{
+    message: string;
+    existingProduct?: Product;
+  } | null>(null);
   const [isActive, setIsActive] = useState(true);
   const [photoDataUrl, setPhotoDataUrl] = useState('');
   const [savingProduct, setSavingProduct] = useState(false);
@@ -165,7 +191,16 @@ export function ProductsPage({
   const [adjustUnitName, setAdjustUnitName] = useState('PCS');
   const [adjustQty, setAdjustQty] = useState('1');
   const [adjustNotes, setAdjustNotes] = useState('');
+  const [adjustStartDate, setAdjustStartDate] = useState(getTodayDateString());
+  const [adjustActualExpiryDate, setAdjustActualExpiryDate] = useState('');
+  const [adjustTargetBatchId, setAdjustTargetBatchId] = useState('');
   const [savingAdjust, setSavingAdjust] = useState(false);
+
+  // Modal Detail Batch & Kedaluwarsa Produk
+  const [batchDetailProduct, setBatchDetailProduct] = useState<Product | null>(null);
+  const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
+  const [editingBatchDate, setEditingBatchDate] = useState('');
+  const [savingBatchDate, setSavingBatchDate] = useState(false);
 
   // Konfirmasi Hapus
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -184,7 +219,7 @@ export function ProductsPage({
   const [savingCategory, setSavingCategory] = useState(false);
 
   useEffect(() => {
-    if (!user || subTab !== 'movements') return;
+    if (!user || !isAdmin || subTab !== 'movements') return;
     setMovementsLoading(true);
     const unsub = subscribeStockMovements(
       isAdmin,
@@ -202,7 +237,7 @@ export function ProductsPage({
   }, [user, isAdmin, subTab]);
 
   useEffect(() => {
-    if (!user || subTab !== 'prices') return;
+    if (!user || !isAdmin || subTab !== 'prices') return;
     setPriceHistoryLoading(true);
     const unsub = subscribePriceHistory(
       isAdmin,
@@ -229,6 +264,8 @@ export function ProductsPage({
     setSku(generateNextSku(products));
     setBarcode('');
     setName('');
+    setBrand('');
+    setVariant('');
     setCategoryId(categories[0]?.id || '');
     setUnit('PCS');
     setCustomUnit('');
@@ -243,6 +280,9 @@ export function ProductsPage({
     setLoadingUsedUnits(false);
     setStock('0');
     setMinStock('5');
+    setInitialExpiryStartDate(getTodayDateString());
+    setInitialActualExpiryDate('');
+    setDuplicateConflict(null);
     setIsActive(true);
     setPhotoDataUrl('');
     setFeedback(null);
@@ -254,7 +294,10 @@ export function ProductsPage({
     setSku(p.sku);
     setBarcode(p.barcode || '');
     setName(p.name);
+    setBrand(p.brand || '');
+    setVariant(p.variant || '');
     setCategoryId(p.categoryId);
+    setDuplicateConflict(null);
 
     const matchedPreset = UNIT_PRESETS.find((u) => u.toUpperCase() === p.unit.trim().toUpperCase());
     if (matchedPreset) {
@@ -568,6 +611,27 @@ export function ProductsPage({
       return;
     }
 
+    // Validasi pencegahan produk ganda di level UI sebelum menyimpan
+    const dupCheck = checkDuplicateProduct(
+      {
+        name,
+        brand,
+        variant,
+        barcode,
+      },
+      products,
+      editingProduct?.id
+    );
+    if (dupCheck.isDuplicate) {
+      setDuplicateConflict({
+        message: DUPLICATE_PRODUCT_WARNING,
+        existingProduct: dupCheck.existingProduct,
+      });
+      setFeedback({ kind: 'err', text: DUPLICATE_PRODUCT_WARNING });
+      return;
+    }
+
+    setDuplicateConflict(null);
     setSavingProduct(true);
     setFeedback(null);
 
@@ -579,6 +643,8 @@ export function ProductsPage({
             sku,
             barcode,
             name,
+            brand,
+            variant,
             photoDataUrl,
             categoryId: cat.id,
             categoryName: cat.name,
@@ -593,7 +659,8 @@ export function ProductsPage({
             minStock: numMinStock,
             isActive,
           },
-          activeUserMeta
+          activeUserMeta,
+          products
         );
         setFeedback({
           kind: 'ok',
@@ -607,6 +674,8 @@ export function ProductsPage({
             sku,
             barcode,
             name,
+            brand,
+            variant,
             photoDataUrl,
             categoryId: cat.id,
             categoryName: cat.name,
@@ -620,9 +689,12 @@ export function ProductsPage({
             sellUnits: parsedSellUnits,
             stock: numStock,
             minStock: numMinStock,
+            initialExpiryStartDate,
+            initialActualExpiryDate: initialActualExpiryDate || undefined,
             isActive,
           },
-          activeUserMeta
+          activeUserMeta,
+          products
         );
         setFeedback({
           kind: 'ok',
@@ -633,7 +705,15 @@ export function ProductsPage({
       }
       setShowProductModal(false);
     } catch (error) {
-      setFeedback({ kind: 'err', text: getReadableFirestoreError(error) });
+      if (error instanceof DuplicateProductError) {
+        setDuplicateConflict({
+          message: error.message || DUPLICATE_PRODUCT_WARNING,
+          existingProduct: error.existingProduct,
+        });
+        setFeedback({ kind: 'err', text: error.message || DUPLICATE_PRODUCT_WARNING });
+      } else {
+        setFeedback({ kind: 'err', text: getReadableFirestoreError(error) });
+      }
     } finally {
       setSavingProduct(false);
     }
@@ -642,7 +722,8 @@ export function ProductsPage({
   const handleDeleteProduct = async (id: string, productName: string) => {
     if (!isAdmin) return;
     try {
-      await deleteProduct(id);
+      const targetProd = products.find((p) => p.id === id);
+      await deleteProduct(id, targetProd);
       setConfirmDeleteId(null);
       setFeedback({ kind: 'ok', text: `Produk "${productName}" dihapus.` });
     } catch (error) {
@@ -656,6 +737,38 @@ export function ProductsPage({
     setAdjustUnitName(p.unit || 'PCS');
     setAdjustQty('1');
     setAdjustNotes('');
+    setAdjustStartDate(getTodayDateString());
+    setAdjustActualExpiryDate('');
+    setAdjustTargetBatchId('');
+  };
+
+  const openBatchDetailModal = (p: Product) => {
+    setBatchDetailProduct(p);
+    setEditingBatchId(null);
+    setEditingBatchDate('');
+  };
+
+  const handleSaveBatchActualExpiry = async (batch: StockBatch) => {
+    if (!isAdmin) return;
+    setSavingBatchDate(true);
+    try {
+      await updateBatchActualExpiry(batch, editingBatchDate.trim() || null);
+      setEditingBatchId(null);
+      setEditingBatchDate('');
+      setFeedback({
+        kind: 'ok',
+        text: editingBatchDate.trim()
+          ? `Tanggal kedaluwarsa aktual kemasan batch ${batch.batchNumber} disimpan (${editingBatchDate.trim()}).`
+          : `Tanggal kedaluwarsa batch ${batch.batchNumber} dikembalikan ke perkiraan +6 bulan.`,
+      });
+    } catch (error) {
+      setFeedback({
+        kind: 'err',
+        text: error instanceof Error ? error.message : getReadableFirestoreError(error),
+      });
+    } finally {
+      setSavingBatchDate(false);
+    }
   };
 
   const adjustOptions = adjustTarget ? getProductAllUnitOptions(adjustTarget) : [];
@@ -694,6 +807,11 @@ export function ProductsPage({
       return;
     }
 
+    const selectedOutBatch =
+      adjustMode === 'out' && adjustTargetBatchId
+        ? stockBatches.find((b) => b.id === adjustTargetBatchId && b.productId === adjustTarget.id) || null
+        : null;
+
     setSavingAdjust(true);
     try {
       await adjustProductStock(
@@ -702,7 +820,12 @@ export function ProductsPage({
         qty,
         adjustNotes,
         activeUserMeta,
-        activeAdjustUnit?.unitName
+        activeAdjustUnit?.unitName,
+        {
+          startDate: adjustStartDate,
+          actualExpiryDate: adjustActualExpiryDate || undefined,
+          targetBatch: selectedOutBatch,
+        }
       );
       const summaryAfter = formatProductStockSummary(adjustPreviewAfter, adjustTarget).primary;
       setFeedback({
@@ -738,14 +861,20 @@ export function ProductsPage({
     if (!importPreview || importPreview.rows.length === 0 || !user || !isAdmin) return;
     setImportingExcel(true);
     try {
-      const count = await importProductsBatch(importPreview.rows, activeUserMeta);
+      const count = await importProductsBatch(importPreview.rows, activeUserMeta, products);
       setImportPreview(null);
       setFeedback({
         kind: 'ok',
         text: `${count} produk dari Excel berhasil diimpor dan tersimpan di Cloud Firestore.`,
       });
     } catch (error) {
-      setFeedback({ kind: 'err', text: getReadableFirestoreError(error) });
+      setFeedback({
+        kind: 'err',
+        text:
+          error instanceof DuplicateProductError
+            ? error.message
+            : getReadableFirestoreError(error),
+      });
     } finally {
       setImportingExcel(false);
     }
@@ -756,12 +885,18 @@ export function ProductsPage({
     if (!user || !isAdmin || !newCatName.trim()) return;
     setSavingCategory(true);
     try {
-      await createCategory(newCatName, newCatDesc, user.uid);
+      await createCategory(newCatName, newCatDesc, user.uid, categories);
       setNewCatName('');
       setNewCatDesc('');
       setFeedback({ kind: 'ok', text: 'Kategori baru berhasil ditambahkan.' });
     } catch (error) {
-      setFeedback({ kind: 'err', text: getReadableFirestoreError(error) });
+      setFeedback({
+        kind: 'err',
+        text:
+          error instanceof Error && error.name === 'CategoryValidationError'
+            ? error.message
+            : getReadableFirestoreError(error),
+      });
     } finally {
       setSavingCategory(false);
     }
@@ -783,15 +918,42 @@ export function ProductsPage({
     0
   );
 
+  const batchSummaryByProductId = React.useMemo(() => {
+    const map = new Map<string, ProductBatchSummary>();
+    products.forEach((p) => {
+      map.set(p.id, summarizeProductBatches(p, stockBatches));
+    });
+    return map;
+  }, [products, stockBatches]);
+
+  const liveDuplicateCheck = React.useMemo(() => {
+    if (!showProductModal) return null;
+    if (!name.trim() && !barcode.trim()) return null;
+    return checkDuplicateProduct(
+      { name, brand, variant, barcode },
+      products,
+      editingProduct?.id
+    );
+  }, [showProductModal, name, brand, variant, barcode, products, editingProduct?.id]);
+
+  const activeDuplicateInfo = duplicateConflict || (liveDuplicateCheck?.isDuplicate
+    ? {
+        message: DUPLICATE_PRODUCT_WARNING,
+        existingProduct: liveDuplicateCheck.existingProduct,
+      }
+    : null);
+
   const filteredProducts = products.filter((p) => {
     if (selectedCategoryId !== 'all' && p.categoryId !== selectedCategoryId) return false;
     if (onlyLowStock && p.stock > p.minStock) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       const hitName = p.name.toLowerCase().includes(q);
+      const hitBrand = (p.brand || '').toLowerCase().includes(q);
+      const hitVariant = (p.variant || '').toLowerCase().includes(q);
       const hitSku = p.sku.toLowerCase().includes(q);
       const hitBarcode = (p.barcode || '').toLowerCase().includes(q);
-      if (!hitName && !hitSku && !hitBarcode) return false;
+      if (!hitName && !hitBrand && !hitVariant && !hitSku && !hitBarcode) return false;
     }
     return true;
   });
@@ -802,6 +964,19 @@ export function ProductsPage({
   const formRetailMargin = formSellNum - formCostNum;
   const formWholesaleNum = wholesalePrice.trim() !== '' ? Math.max(0, Number(wholesalePrice) || 0) : null;
   const formWholesaleMargin = formWholesaleNum !== null ? formWholesaleNum - formCostNum : null;
+  const estimatedInitialExpiry = computeEstimatedExpiryDate(initialExpiryStartDate);
+
+  if (!isAdmin) {
+    return (
+      <div className="bg-white border border-red-200 rounded-xl p-6 text-sm text-red-700 flex items-center gap-3">
+        <AlertTriangle className="w-5 h-5 shrink-0" />
+        <span>
+          Akses ditolak. Pengelolaan Produk, Harga, Barcode, Satuan, dan Penyesuaian Stok hanya
+          dapat diakses oleh Admin.
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -1104,6 +1279,8 @@ export function ProductsPage({
                               : p.baseCanSell === false
                                 ? ' [Khusus Beli]'
                                 : '';
+                        const bSummary = batchSummaryByProductId.get(p.id);
+                        const batchCount = bSummary?.allBatchesEvaluated.filter((b) => b.status === 'active' && b.remainingBaseQty > 0.0001).length || 0;
                         return (
                           <tr key={p.id} className="hover:bg-slate-50 align-top">
                             <td className="py-3 px-4">
@@ -1129,6 +1306,30 @@ export function ProductsPage({
                                       </span>
                                     )}
                                   </div>
+                                  {(p.brand || p.variant) && (
+                                    <div className="text-[11px] font-medium text-slate-600">
+                                      {[p.brand, p.variant].filter(Boolean).join(' · ')}
+                                    </div>
+                                  )}
+                                  {bSummary && (bSummary.hasExpiredStock || bSummary.hasNearExpiry || batchCount > 0) && (
+                                    <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                                      {bSummary.hasExpiredStock && (
+                                        <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-bold">
+                                          EXPIRED ({formatQty(bSummary.expiredBatchStock)} {p.unit})
+                                        </span>
+                                      )}
+                                      {bSummary.hasNearExpiry && (
+                                        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                                          MENDEKATI EXPIRED
+                                        </span>
+                                      )}
+                                      {batchCount > 0 && bSummary.nearestNonExpired && (
+                                        <span className="text-[10px] font-mono-num text-slate-500">
+                                          {batchCount} batch · ED terdekat {formatShortIdDate(bSummary.nearestNonExpired.effectiveExpiryDate)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
                                   <div className="text-xs text-slate-500">
                                     Dasar: <span className="font-semibold text-slate-700">{p.unit}</span>
                                     {baseRoleNote && (
@@ -1240,6 +1441,15 @@ export function ProductsPage({
                                   <span className="inline-flex items-center gap-1">
                                     <button
                                       type="button"
+                                      onClick={() => openBatchDetailModal(p)}
+                                      className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-100 inline-flex items-center gap-1 cursor-pointer"
+                                      title="Lihat & Kelola Batch Kedaluwarsa"
+                                    >
+                                      <Calendar className="w-3.5 h-3.5 text-emerald-700" />
+                                      <span>Batch{batchCount > 0 ? ` (${batchCount})` : ''}</span>
+                                    </button>
+                                    <button
+                                      type="button"
                                       onClick={() => openAdjustModal(p)}
                                       className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-100 inline-flex items-center gap-1 cursor-pointer"
                                       title="Sesuaikan Stok"
@@ -1281,6 +1491,8 @@ export function ProductsPage({
                     const isLow = p.stock > 0 && p.stock <= p.minStock;
                     const extraUnits = p.sellUnits || [];
                     const stockSummary = formatProductStockSummary(p.stock, p);
+                    const bSummary = batchSummaryByProductId.get(p.id);
+                    const batchCount = bSummary?.allBatchesEvaluated.filter((b) => b.status === 'active' && b.remainingBaseQty > 0.0001).length || 0;
                     return (
                       <div key={p.id} className="p-4 space-y-2.5">
                         <div className="flex items-start gap-3">
@@ -1300,6 +1512,11 @@ export function ProductsPage({
                             <div className="font-semibold text-sm text-slate-900 truncate">
                               {p.name}
                             </div>
+                            {(p.brand || p.variant) && (
+                              <div className="text-[11px] font-medium text-slate-600">
+                                {[p.brand, p.variant].filter(Boolean).join(' · ')}
+                              </div>
+                            )}
                             <div className="text-xs text-slate-500">
                               <span className="font-mono-num">{p.sku}</span>
                               <span className="mx-1.5" aria-hidden="true">·</span>
@@ -1310,6 +1527,25 @@ export function ProductsPage({
                             {p.barcode && (
                               <div className="text-[11px] font-mono-num text-slate-400">
                                 Barcode: {p.barcode}
+                              </div>
+                            )}
+                            {bSummary && (bSummary.hasExpiredStock || bSummary.hasNearExpiry || batchCount > 0) && (
+                              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                {bSummary.hasExpiredStock && (
+                                  <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-bold">
+                                    EXPIRED
+                                  </span>
+                                )}
+                                {bSummary.hasNearExpiry && (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                                    MENDEKATI EXPIRED
+                                  </span>
+                                )}
+                                {batchCount > 0 && bSummary.nearestNonExpired && (
+                                  <span className="text-[10px] font-mono-num text-slate-500">
+                                    {batchCount} batch · ED {formatShortIdDate(bSummary.nearestNonExpired.effectiveExpiryDate)}
+                                  </span>
+                                )}
                               </div>
                             )}
                           </div>
@@ -1376,14 +1612,22 @@ export function ProductsPage({
                         </div>
 
                         {isAdmin && (
-                          <div className="flex items-center gap-2 pt-1">
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => openBatchDetailModal(p)}
+                              className="min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center justify-center gap-1"
+                            >
+                              <Calendar className="w-3.5 h-3.5 text-emerald-700" />
+                              <span>Batch ({batchCount})</span>
+                            </button>
                             <button
                               type="button"
                               onClick={() => openAdjustModal(p)}
                               className="flex-1 min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center justify-center gap-1.5"
                             >
                               <SlidersHorizontal className="w-3.5 h-3.5" />
-                              <span>Sesuaikan Stok</span>
+                              <span>Stok</span>
                             </button>
                             <button
                               type="button"
@@ -1424,7 +1668,7 @@ export function ProductsPage({
                 Riwayat Stok Masuk &amp; Keluar
               </h3>
               <p className="text-xs text-slate-500">
-                Semua pergerakan stok dikonversi dan dicatat otomatis ke satuan dasar produk.
+                Semua pergerakan stok (Admin &amp; Kasir) dikonversi dan dicatat otomatis ke satuan dasar produk secara real-time.
               </p>
             </div>
             <ArrowUpDown className="w-4 h-4 text-slate-400" />
@@ -1526,7 +1770,7 @@ export function ProductsPage({
                 Riwayat Perubahan Harga &amp; Satuan
               </h3>
               <p className="text-xs text-slate-500">
-                Catatan otomatis setiap kali harga modal, harga ecer, harga grosir, atau konversi satuan ditetapkan atau diubah.
+                Catatan otomatis tersinkronisasi real-time setiap kali harga modal, harga ecer, harga grosir, atau konversi satuan ditetapkan atau diubah.
               </p>
             </div>
             <History className="w-4 h-4 text-slate-400" />
@@ -1795,6 +2039,51 @@ export function ProductsPage({
                 </div>
               </div>
 
+              {/* Peringatan Duplikasi Produk */}
+              {activeDuplicateInfo && (
+                <div className="p-4 rounded-xl bg-red-50 border border-red-300 text-red-900 space-y-2.5">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
+                    <div className="flex-1 space-y-1 text-xs">
+                      <div className="font-bold text-sm text-red-800">
+                        {activeDuplicateInfo.message}
+                      </div>
+                      {activeDuplicateInfo.existingProduct && (
+                        <div className="text-red-800">
+                          Data terdaftar:{' '}
+                          <strong>{formatProductFullName(activeDuplicateInfo.existingProduct)}</strong> · Kode{' '}
+                          <span className="font-mono-num">{activeDuplicateInfo.existingProduct.sku}</span>
+                          {activeDuplicateInfo.existingProduct.barcode
+                            ? ` · Barcode ${activeDuplicateInfo.existingProduct.barcode}`
+                            : ''}
+                          {' '}· Stok {formatQty(activeDuplicateInfo.existingProduct.stock)}{' '}
+                          {activeDuplicateInfo.existingProduct.unit}
+                        </div>
+                      )}
+                      <div className="text-[11px] text-red-700">
+                        Jika merek sama tetapi ukuran, rasa, berat, atau varian berbeda, isi kolom{' '}
+                        <strong>Varian / Ukuran</strong> agar tetap dapat didaftarkan sebagai produk berbeda.
+                      </div>
+                    </div>
+                  </div>
+                  {activeDuplicateInfo.existingProduct && (
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (activeDuplicateInfo.existingProduct) {
+                            openEditProduct(activeDuplicateInfo.existingProduct);
+                          }
+                        }}
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-red-700 text-white text-xs font-semibold hover:bg-red-800 cursor-pointer"
+                      >
+                        Buka Data Produk
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Identitas Barang */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
@@ -1822,7 +2111,10 @@ export function ProductsPage({
                       type="text"
                       maxLength={64}
                       value={barcode}
-                      onChange={(e) => setBarcode(e.target.value)}
+                      onChange={(e) => {
+                        setBarcode(e.target.value);
+                        setDuplicateConflict(null);
+                      }}
                       placeholder="Scan atau ketik barcode"
                       className="flex-1 min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
                     />
@@ -1847,7 +2139,10 @@ export function ProductsPage({
                     required
                     maxLength={120}
                     value={name}
-                    onChange={(e) => setName(e.target.value)}
+                    onChange={(e) => {
+                      setName(e.target.value);
+                      setDuplicateConflict(null);
+                    }}
                     placeholder="Contoh: Mi Instan Goreng"
                     className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
                   />
@@ -1870,6 +2165,42 @@ export function ProductsPage({
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label htmlFor="prd-brand" className="block text-xs font-medium text-slate-700">
+                    Merek (Opsional)
+                  </label>
+                  <input
+                    id="prd-brand"
+                    type="text"
+                    maxLength={60}
+                    value={brand}
+                    onChange={(e) => {
+                      setBrand(e.target.value);
+                      setDuplicateConflict(null);
+                    }}
+                    placeholder="Contoh: Indomie / Kapal Api / Aqua"
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label htmlFor="prd-variant" className="block text-xs font-medium text-slate-700">
+                    Varian / Ukuran / Rasa / Berat (Opsional)
+                  </label>
+                  <input
+                    id="prd-variant"
+                    type="text"
+                    maxLength={80}
+                    value={variant}
+                    onChange={(e) => {
+                      setVariant(e.target.value);
+                      setDuplicateConflict(null);
+                    }}
+                    placeholder="Contoh: 85gr / 600ml / Rasa Soto / Jumbo"
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
                 </div>
               </div>
 
@@ -2102,6 +2433,52 @@ export function ProductsPage({
                     />
                   </div>
                 </div>
+
+                {!editingProduct && Number(stock) > 0 && (
+                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                    <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
+                      <Calendar className="w-4 h-4 text-emerald-700 shrink-0" />
+                      <span>Pengelolaan Tanggal Kedaluwarsa Batch Stok Awal (+6 Bulan Otomatis)</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                      <div className="space-y-1">
+                        <label htmlFor="prd-exp-start" className="block text-[11px] font-medium text-slate-600">
+                          Tanggal Awal Input Stok
+                        </label>
+                        <input
+                          id="prd-exp-start"
+                          type="date"
+                          value={initialExpiryStartDate}
+                          onChange={(e) => setInitialExpiryStartDate(e.target.value)}
+                          className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-medium text-slate-600">
+                          Perkiraan Kedaluwarsa (+6 Bln)
+                        </div>
+                        <div className="min-h-[40px] px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-mono-num font-semibold text-slate-800 flex items-center">
+                          {formatShortIdDate(estimatedInitialExpiry)} ({estimatedInitialExpiry})
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label htmlFor="prd-exp-actual" className="block text-[11px] font-medium text-slate-600">
+                          ED Aktual Kemasan (Opsional, Diutamakan)
+                        </label>
+                        <input
+                          id="prd-exp-actual"
+                          type="date"
+                          value={initialActualExpiryDate}
+                          onChange={(e) => setInitialActualExpiryDate(e.target.value)}
+                          className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      {EXPIRY_ESTIMATE_DISCLAIMER}
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Satuan Tambahan (Multi-Satuan Universal Pembelian & Penjualan) */}
@@ -2597,6 +2974,73 @@ export function ProductsPage({
                 </div>
               </div>
 
+              {adjustMode === 'in' && (
+                <div className="p-3.5 rounded-lg bg-emerald-50/60 border border-emerald-200 space-y-2.5">
+                  <div className="text-xs font-semibold text-emerald-900 flex items-center gap-1.5">
+                    <Calendar className="w-4 h-4 text-emerald-700" />
+                    <span>Batch Baru &amp; Perkiraan Kedaluwarsa (+6 Bulan)</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div className="space-y-1">
+                      <label htmlFor="adj-start-date" className="block text-[11px] font-medium text-slate-700">
+                        Tanggal Input Stok
+                      </label>
+                      <input
+                        id="adj-start-date"
+                        type="date"
+                        value={adjustStartDate}
+                        onChange={(e) => setAdjustStartDate(e.target.value)}
+                        className="w-full min-h-[38px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label htmlFor="adj-actual-exp" className="block text-[11px] font-medium text-slate-700">
+                        ED Aktual Kemasan (Opsional)
+                      </label>
+                      <input
+                        id="adj-actual-exp"
+                        type="date"
+                        value={adjustActualExpiryDate}
+                        onChange={(e) => setAdjustActualExpiryDate(e.target.value)}
+                        className="w-full min-h-[38px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="text-[11px] font-mono-num text-emerald-900">
+                    Perkiraan +6 bulan: <strong>{formatShortIdDate(computeEstimatedExpiryDate(adjustStartDate))}</strong>{' '}
+                    ({computeEstimatedExpiryDate(adjustStartDate)})
+                  </div>
+                  <p className="text-[11px] text-slate-600">{EXPIRY_ESTIMATE_DISCLAIMER}</p>
+                </div>
+              )}
+
+              {adjustMode === 'out' && (() => {
+                const activeBatches = (batchSummaryByProductId.get(adjustTarget.id)?.allBatchesEvaluated || []).filter(
+                  (b) => b.status === 'active' && b.remainingBaseQty > 0.0001
+                );
+                if (activeBatches.length === 0) return null;
+                return (
+                  <div className="space-y-1.5">
+                    <label htmlFor="adj-target-batch" className="block text-xs font-medium text-slate-700">
+                      Potong dari Batch Tertentu (Opsional)
+                    </label>
+                    <select
+                      id="adj-target-batch"
+                      value={adjustTargetBatchId}
+                      onChange={(e) => setAdjustTargetBatchId(e.target.value)}
+                      className="w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                    >
+                      <option value="">Tidak pilih batch spesifik (stok umum)</option>
+                      {activeBatches.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.batchNumber} · ED {b.effectiveExpiryDate} ({b.expiryStatus}) · Sisa {formatQty(b.remainingBaseQty)} {b.baseUnit}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })()}
+
               <div className="space-y-1.5">
                 <label htmlFor="adj-notes" className="block text-xs font-medium text-slate-700">
                   Catatan / Alasan
@@ -2632,6 +3076,208 @@ export function ProductsPage({
           </div>
         </div>
       )}
+
+      {/* MODAL DETAIL & EDIT BATCH KEDALUWARSA */}
+      {batchDetailProduct && (() => {
+        const summary = batchSummaryByProductId.get(batchDetailProduct.id) || summarizeProductBatches(batchDetailProduct, stockBatches);
+        const batches = summary.allBatchesEvaluated;
+        return (
+          <div className="fixed inset-0 z-40 bg-slate-900/60 flex items-center justify-center p-4 overflow-y-auto">
+            <div className="bg-white border border-slate-200 rounded-xl max-w-3xl w-full max-h-[88vh] flex flex-col overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                <div>
+                  <h3 className="font-display font-semibold text-base text-slate-900">
+                    Batch &amp; Masa Kedaluwarsa — {formatProductFullName(batchDetailProduct)}
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Setiap pembelian atau input stok tanggal berbeda dicatat terpisah. Total stok: {formatQty(batchDetailProduct.stock)} {batchDetailProduct.unit}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBatchDetailProduct(null)}
+                  className="w-9 h-9 rounded-lg flex items-center justify-center text-slate-500 hover:bg-slate-100 cursor-pointer"
+                  aria-label="Tutup Detail Batch"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-5 overflow-y-auto space-y-4 flex-1">
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600">
+                  {EXPIRY_ESTIMATE_DISCLAIMER}
+                </div>
+
+                {batches.length === 0 ? (
+                  <div className="p-8 text-center text-sm text-slate-500 border border-dashed border-slate-200 rounded-lg">
+                    Belum ada catatan batch kedaluwarsa untuk produk ini (stok lama tetap dapat dijual normal). Batch baru akan terbentuk otomatis saat pembelian atau penambahan stok baru.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {batches.map((b) => {
+                      const isEditingThis = editingBatchId === b.id;
+                      const statusBadgeClass =
+                        b.status === 'pulled'
+                          ? 'bg-slate-200 text-slate-700'
+                          : b.status === 'handled'
+                            ? 'bg-blue-100 text-blue-800'
+                            : b.status === 'depleted' || b.remainingBaseQty <= 0.0001
+                              ? 'bg-slate-100 text-slate-500'
+                              : b.expiryStatus === 'EXPIRED'
+                                ? 'bg-red-100 text-red-800'
+                                : b.expiryStatus === 'MENDEKATI EXPIRED'
+                                  ? 'bg-amber-100 text-amber-900'
+                                  : 'bg-emerald-100 text-emerald-800';
+                      const statusLabel =
+                        b.status === 'pulled'
+                          ? 'Ditarik Admin'
+                          : b.status === 'handled'
+                            ? 'Ditangani Admin'
+                            : b.status === 'depleted' || b.remainingBaseQty <= 0.0001
+                              ? 'Stok Habis'
+                              : b.expiryStatus;
+                      return (
+                        <div
+                          key={b.id}
+                          className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2.5"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="font-mono-num text-xs font-bold text-slate-900">
+                                  {b.batchNumber}
+                                </span>
+                                <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${statusBadgeClass}`}>
+                                  {statusLabel}
+                                </span>
+                                {b.isActualPackagingDate ? (
+                                  <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] font-semibold">
+                                    ED Kemasan Aktual
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px]">
+                                    Perkiraan +6 Bulan
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-slate-500 mt-1">
+                                Sumber:{' '}
+                                {b.sourceType === 'purchase'
+                                  ? `Pembelian${b.supplierName ? ` (${b.supplierName})` : ''}`
+                                  : b.sourceType === 'initial_product'
+                                    ? 'Stok Awal Produk'
+                                    : b.sourceType === 'excel_import'
+                                      ? 'Import Excel'
+                                      : 'Input Stok Manual'}
+                                {b.sourceNumber ? ` · ${b.sourceNumber}` : ''}
+                              </div>
+                            </div>
+                            <div className="text-right font-mono-num">
+                              <div className="text-sm font-bold text-slate-900">
+                                Sisa {formatQty(b.remainingBaseQty)} / {formatQty(b.initialBaseQty)} {b.baseUnit}
+                              </div>
+                              <div className="text-xs text-slate-500">
+                                {b.remainingLabel}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-slate-100 text-xs">
+                            <div>
+                              <span className="text-slate-500">Tanggal Awal: </span>
+                              <strong className="font-mono-num text-slate-800">{formatShortIdDate(b.startDate)}</strong>
+                            </div>
+                            <div>
+                              <span className="text-slate-500">Perkiraan +6 Bln: </span>
+                              <strong className="font-mono-num text-slate-800">{formatShortIdDate(b.estimatedExpiryDate)}</strong>
+                            </div>
+                            <div>
+                              <span className="text-slate-500">ED Aktif: </span>
+                              <strong className="font-mono-num text-slate-900">{formatShortIdDate(b.effectiveExpiryDate)}</strong>
+                            </div>
+                          </div>
+
+                          {b.handlingNotes && (
+                            <div className="text-xs text-slate-600 bg-slate-50 px-2.5 py-1.5 rounded border border-slate-200">
+                              Catatan penanganan ({b.handledDate || '-'} oleh {b.handledByName || 'Admin'}): {b.handlingNotes}
+                            </div>
+                          )}
+
+                          {isAdmin && (
+                            <div className="pt-1 flex flex-wrap items-center justify-between gap-2">
+                              {isEditingThis ? (
+                                <div className="flex flex-wrap items-center gap-2 w-full">
+                                  <input
+                                    type="date"
+                                    value={editingBatchDate}
+                                    onChange={(e) => setEditingBatchDate(e.target.value)}
+                                    className="min-h-[38px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={savingBatchDate}
+                                    onClick={() => handleSaveBatchActualExpiry(b)}
+                                    className="min-h-[38px] px-3 py-1 rounded-lg bg-emerald-700 text-white text-xs font-medium hover:bg-emerald-800 disabled:opacity-50 cursor-pointer"
+                                  >
+                                    {savingBatchDate ? 'Menyimpan...' : 'Simpan ED Kemasan'}
+                                  </button>
+                                  {b.actualExpiryDate && (
+                                    <button
+                                      type="button"
+                                      disabled={savingBatchDate}
+                                      onClick={() => {
+                                        setEditingBatchDate('');
+                                        void updateBatchActualExpiry(b, null).then(() => {
+                                          setEditingBatchId(null);
+                                        });
+                                      }}
+                                      className="min-h-[38px] px-3 py-1 rounded-lg border border-slate-300 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                    >
+                                      Reset ke +6 Bln
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingBatchId(null)}
+                                    className="min-h-[38px] px-3 py-1 rounded-lg text-xs text-slate-500 hover:bg-slate-100 cursor-pointer"
+                                  >
+                                    Batal
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingBatchId(b.id);
+                                    setEditingBatchDate(b.actualExpiryDate || b.effectiveExpiryDate);
+                                  }}
+                                  className="min-h-[36px] px-3 py-1 rounded-lg border border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                >
+                                  Ubah Tanggal Kedaluwarsa Kemasan
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="px-5 py-3.5 border-t border-slate-200 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setBatchDetailProduct(null)}
+                  className="min-h-[42px] px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Tutup
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* MODAL PREVIEW IMPORT EXCEL */}
       {importPreview && (
@@ -2671,7 +3317,7 @@ export function ProductsPage({
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
                         <th className="py-2.5 px-3">Kode</th>
-                        <th className="py-2.5 px-3">Nama Barang</th>
+                        <th className="py-2.5 px-3">Nama, Merek &amp; Varian</th>
                         <th className="py-2.5 px-3">Kategori</th>
                         <th className="py-2.5 px-3 text-right">HPP</th>
                         <th className="py-2.5 px-3 text-right">Ecer</th>
@@ -2680,34 +3326,50 @@ export function ProductsPage({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {importPreview.rows.slice(0, 50).map((row) => (
-                        <tr key={row.rowIndex}>
-                          <td className="py-2 px-3 font-mono-num">{row.sku}</td>
-                          <td className="py-2 px-3 font-medium text-slate-900">
-                            {row.name}
-                            {row.sellUnits && row.sellUnits.length > 0 && (
-                              <div className="text-[11px] font-normal text-slate-500">
-                                {row.sellUnits.map((u) => `${u.unitName}=${u.conversion}`).join(', ')}
-                              </div>
-                            )}
-                          </td>
-                          <td className="py-2 px-3">{row.categoryName}</td>
-                          <td className="py-2 px-3 text-right font-mono-num">
-                            {formatRupiah(row.costPrice)}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono-num">
-                            {formatRupiah(row.sellPrice)}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono-num">
-                            {row.wholesalePrice !== undefined
-                              ? formatRupiah(row.wholesalePrice)
-                              : '-'}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono-num">
-                            {row.stock} {row.unit}
-                          </td>
-                        </tr>
-                      ))}
+                      {importPreview.rows.slice(0, 50).map((row) => {
+                        const rowDup = checkDuplicateProduct(
+                          { name: row.name, brand: row.brand, variant: row.variant, barcode: row.barcode },
+                          products
+                        );
+                        return (
+                          <tr key={row.rowIndex} className={rowDup.isDuplicate ? 'bg-red-50' : ''}>
+                            <td className="py-2 px-3 font-mono-num">{row.sku}</td>
+                            <td className="py-2 px-3 font-medium text-slate-900">
+                              <div>{row.name}</div>
+                              {(row.brand || row.variant) && (
+                                <div className="text-[11px] font-normal text-slate-600">
+                                  {[row.brand, row.variant].filter(Boolean).join(' · ')}
+                                </div>
+                              )}
+                              {rowDup.isDuplicate && (
+                                <div className="text-[11px] font-bold text-red-700">
+                                  PRODUK SUDAH TERDAFTAR
+                                </div>
+                              )}
+                              {row.sellUnits && row.sellUnits.length > 0 && (
+                                <div className="text-[11px] font-normal text-slate-500">
+                                  {row.sellUnits.map((u) => `${u.unitName}=${u.conversion}`).join(', ')}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2 px-3">{row.categoryName}</td>
+                            <td className="py-2 px-3 text-right font-mono-num">
+                              {formatRupiah(row.costPrice)}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono-num">
+                              {formatRupiah(row.sellPrice)}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono-num">
+                              {row.wholesalePrice !== undefined
+                                ? formatRupiah(row.wholesalePrice)
+                                : '-'}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono-num">
+                              {row.stock} {row.unit}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

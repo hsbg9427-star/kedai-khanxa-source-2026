@@ -2,6 +2,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -46,8 +47,8 @@ export function subscribeReceivables(
   onError: (err: unknown) => void
 ): Unsubscribe {
   const q = isAdmin
-    ? query(collection(db, 'receivables'))
-    : query(collection(db, 'receivables'), where('recordedByUid', '==', userUid));
+    ? query(collection(db, 'receivables'), orderBy('createdAt', 'desc'), limit(300))
+    : query(collection(db, 'receivables'), where('recordedByUid', '==', userUid), limit(250));
 
   return onSnapshot(
     q,

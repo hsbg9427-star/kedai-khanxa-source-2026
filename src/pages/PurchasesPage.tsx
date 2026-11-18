@@ -28,6 +28,7 @@ import type {
   Purchase,
   PurchaseItem,
   PurchaseReturn,
+  StockBatch,
   StockMovement,
   StoreSetting,
   Supplier,
@@ -66,6 +67,12 @@ import {
 } from '../utils/purchaseCalculations';
 import type { ReportPeriodType } from '../utils/qrisFee';
 import {
+  computeEstimatedExpiryDate,
+  evaluateBatchExpiry,
+  EXPIRY_ESTIMATE_DISCLAIMER,
+  formatShortIdDate,
+} from '../utils/expiryUtils';
+import {
   computeBaseQuantityFromUnit,
   formatProductStockSummary,
   formatUnitConversionLabel,
@@ -78,6 +85,7 @@ interface PurchasesPageProps {
   products: Product[];
   accounts: Account[];
   storeSetting: StoreSetting | null;
+  stockBatches?: StockBatch[];
 }
 
 type PurchaseSubTab = 'buy' | 'history' | 'suppliers' | 'debts' | 'returns';
@@ -89,6 +97,7 @@ interface FormLineRow {
   quantity: string;
   unitCost: string;
   lineDiscount: string;
+  actualExpiryDate: string;
 }
 
 const PERIOD_OPTIONS: { id: ReportPeriodType; label: string }[] = [
@@ -106,6 +115,7 @@ function createEmptyLine(): FormLineRow {
     quantity: '1',
     unitCost: '',
     lineDiscount: '0',
+    actualExpiryDate: '',
   };
 }
 
@@ -124,7 +134,12 @@ function getPaymentMethodLabel(method: PurchasePaymentMethod | string): string {
   }
 }
 
-export function PurchasesPage({ products, accounts, storeSetting }: PurchasesPageProps) {
+export function PurchasesPage({
+  products,
+  accounts,
+  storeSetting,
+  stockBatches = [],
+}: PurchasesPageProps) {
   const { user, profile, isAdmin } = useAuth();
 
   const [subTab, setSubTab] = useState<PurchaseSubTab>('buy');
@@ -203,6 +218,8 @@ export function PurchasesPage({ products, accounts, storeSetting }: PurchasesPag
     return activeProducts.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
+        (p.brand && p.brand.toLowerCase().includes(q)) ||
+        (p.variant && p.variant.toLowerCase().includes(q)) ||
         p.sku.toLowerCase().includes(q) ||
         (p.barcode && p.barcode.toLowerCase().includes(q))
     );
@@ -398,7 +415,7 @@ export function PurchasesPage({ products, accounts, storeSetting }: PurchasesPag
       prev.map((row) => {
         if (row.rowId !== rowId) return row;
         if (!prod) {
-          return { ...row, productId: '', unitName: '', unitCost: '' };
+          return { ...row, productId: '', unitName: '', unitCost: '', actualExpiryDate: '' };
         }
         const buyOptions = getProductBuyOptions(prod);
         const defaultOpt = buyOptions[0];
@@ -414,6 +431,7 @@ export function PurchasesPage({ products, accounts, storeSetting }: PurchasesPag
           productId: prod.id,
           unitName: defaultUnitName,
           unitCost: suggestedCost > 0 ? String(suggestedCost) : '',
+          actualExpiryDate: '',
         };
       })
     );
@@ -487,6 +505,7 @@ export function PurchasesPage({ products, accounts, storeSetting }: PurchasesPag
         quantity: Number(r.quantity) || 0,
         unitCost: r.unitCost === '' ? -1 : Number(r.unitCost),
         lineDiscount: Number(r.lineDiscount) || 0,
+        actualExpiryDate: r.actualExpiryDate || undefined,
       });
     }
 
@@ -781,6 +800,7 @@ export function PurchasesPage({ products, accounts, storeSetting }: PurchasesPag
           settlementPreference: returnSettlementPref,
           account: targetAcc,
           reason: returnReason,
+          batches: stockBatches,
         },
         {
           uid: user.uid,
@@ -1225,49 +1245,84 @@ export function PurchasesPage({ products, accounts, storeSetting }: PurchasesPag
                     </div>
 
                     {selectedProd && (
-                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/80 text-xs text-slate-600">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <span>
-                            Stok sekarang:{' '}
-                            <strong className="font-mono-num text-slate-900">
-                              {formatProductStockSummary(selectedProd.stock, selectedProd).primary}
-                            </strong>
-                          </span>
-                          {activeOption && Number(row.quantity) > 0 && (
-                            <span className="text-emerald-700 font-medium">
-                              Stok masuk: +
-                              <span className="font-mono-num">
-                                {formatQty(
-                                  computeBaseQuantityFromUnit(Number(row.quantity) || 0, activeOption)
-                                )}{' '}
-                                {selectedProd.unit}
-                              </span>
-                            </span>
-                          )}
-                          {computedLine && (
+                      <div className="space-y-2.5 pt-2 border-t border-slate-200/80">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+                          <div className="flex flex-wrap items-center gap-3">
                             <span>
-                              HPP/{selectedProd.unit}:{' '}
-                              <span className="font-mono-num text-slate-700">
-                                {formatRupiah(computedLine.hppBefore)}
-                              </span>{' '}
-                              →{' '}
-                              <strong className="font-mono-num text-emerald-700">
-                                {formatRupiah(computedLine.hppAfter)}
+                              Stok sekarang:{' '}
+                              <strong className="font-mono-num text-slate-900">
+                                {formatProductStockSummary(selectedProd.stock, selectedProd).primary}
                               </strong>
                             </span>
-                          )}
+                            {activeOption && Number(row.quantity) > 0 && (
+                              <span className="text-emerald-700 font-medium">
+                                Stok masuk: +
+                                <span className="font-mono-num">
+                                  {formatQty(
+                                    computeBaseQuantityFromUnit(Number(row.quantity) || 0, activeOption)
+                                  )}{' '}
+                                  {selectedProd.unit}
+                                </span>
+                              </span>
+                            )}
+                            {computedLine && (
+                              <span>
+                                HPP/{selectedProd.unit}:{' '}
+                                <span className="font-mono-num text-slate-700">
+                                  {formatRupiah(computedLine.hppBefore)}
+                                </span>{' '}
+                                →{' '}
+                                <strong className="font-mono-num text-emerald-700">
+                                  {formatRupiah(computedLine.hppAfter)}
+                                </strong>
+                              </span>
+                            )}
+                          </div>
+                          <div className="font-mono-num font-semibold text-slate-900">
+                            Subtotal:{' '}
+                            {computedLine
+                              ? formatRupiah(computedLine.afterLineDiscount)
+                              : formatRupiah(
+                                  Math.max(
+                                    0,
+                                    (Number(row.quantity) || 0) * (Number(row.unitCost) || 0) -
+                                      (Number(row.lineDiscount) || 0)
+                                  )
+                                )}
+                          </div>
                         </div>
-                        <div className="font-mono-num font-semibold text-slate-900">
-                          Subtotal:{' '}
-                          {computedLine
-                            ? formatRupiah(computedLine.afterLineDiscount)
-                            : formatRupiah(
-                                Math.max(
-                                  0,
-                                  (Number(row.quantity) || 0) * (Number(row.unitCost) || 0) -
-                                    (Number(row.lineDiscount) || 0)
-                                )
-                              )}
+
+                        <div className="p-3 rounded-lg bg-white border border-slate-200 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                            <span className="font-semibold text-slate-800 inline-flex items-center gap-1.5">
+                              <Calendar className="w-3.5 h-3.5 text-emerald-700" />
+                              <span>Masa Kedaluwarsa Batch (+6 Bulan Otomatis)</span>
+                            </span>
+                            <span className="font-mono-num text-slate-600">
+                              Tgl Pembelian: <strong>{formatShortIdDate(purchaseDate)}</strong> → Perkiraan +6 Bln:{' '}
+                              <strong className="text-emerald-800">
+                                {formatShortIdDate(computeEstimatedExpiryDate(purchaseDate))}
+                              </strong>
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                            <div className="sm:col-span-5 flex items-center gap-2">
+                              <label className="text-[11px] font-medium text-slate-600 whitespace-nowrap">
+                                ED Aktual Kemasan (Opsional):
+                              </label>
+                              <input
+                                type="date"
+                                value={row.actualExpiryDate}
+                                onChange={(e) =>
+                                  handleUpdateRow(row.rowId, { actualExpiryDate: e.target.value })
+                                }
+                                className="flex-1 min-h-[36px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                              />
+                            </div>
+                            <div className="sm:col-span-7 text-[10px] text-slate-500">
+                              {EXPIRY_ESTIMATE_DISCLAIMER}
+                            </div>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -2574,6 +2629,79 @@ export function PurchasesPage({ products, accounts, storeSetting }: PurchasesPag
               {detailPurchase.notes && (
                 <p className="text-xs text-slate-600">Catatan: {detailPurchase.notes}</p>
               )}
+
+              {(() => {
+                const purchaseBatches = stockBatches.filter(
+                  (b) => b.sourceRefId === detailPurchase.id
+                );
+                if (purchaseBatches.length === 0) return null;
+                return (
+                  <div className="space-y-2 pt-2 border-t border-slate-200">
+                    <div className="text-xs font-semibold text-slate-800">
+                      Batch &amp; Tanggal Kedaluwarsa Terbentuk ({purchaseBatches.length})
+                    </div>
+                    <div className="overflow-x-auto border border-slate-200 rounded-lg">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
+                            <th className="py-2 px-3">Batch &amp; Produk</th>
+                            <th className="py-2 px-3">Tgl Awal</th>
+                            <th className="py-2 px-3">Perkiraan +6 Bln</th>
+                            <th className="py-2 px-3">ED Aktif</th>
+                            <th className="py-2 px-3 text-right">Sisa / Awal</th>
+                            <th className="py-2 px-3">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {purchaseBatches.map((b) => {
+                            const ev = evaluateBatchExpiry(b);
+                            return (
+                              <tr key={b.id}>
+                                <td className="py-2 px-3">
+                                  <div className="font-mono-num font-semibold text-slate-900">
+                                    {b.batchNumber}
+                                  </div>
+                                  <div className="text-[11px] text-slate-600">{b.productName}</div>
+                                </td>
+                                <td className="py-2 px-3 font-mono-num">
+                                  {formatShortIdDate(b.startDate)}
+                                </td>
+                                <td className="py-2 px-3 font-mono-num">
+                                  {formatShortIdDate(b.estimatedExpiryDate)}
+                                </td>
+                                <td className="py-2 px-3 font-mono-num">
+                                  <div className="font-semibold text-slate-900">
+                                    {formatShortIdDate(ev.effectiveExpiryDate)}
+                                  </div>
+                                  <div className="text-[10px] text-slate-500">
+                                    {ev.isActualPackagingDate ? 'Kemasan Aktual' : 'Perkiraan +6 Bln'}
+                                  </div>
+                                </td>
+                                <td className="py-2 px-3 text-right font-mono-num">
+                                  {formatQty(b.remainingBaseQty)} / {formatQty(b.initialBaseQty)} {b.baseUnit}
+                                </td>
+                                <td className="py-2 px-3">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                      ev.expiryStatus === 'EXPIRED'
+                                        ? 'bg-red-100 text-red-800'
+                                        : ev.expiryStatus === 'MENDEKATI EXPIRED'
+                                          ? 'bg-amber-100 text-amber-900'
+                                          : 'bg-emerald-100 text-emerald-800'
+                                    }`}
+                                  >
+                                    {ev.expiryStatus}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </div>

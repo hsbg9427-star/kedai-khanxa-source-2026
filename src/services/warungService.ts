@@ -362,32 +362,22 @@ export function subscribeTodayDashboardMetrics(
     ? query(collection(db, 'sales'), where('transactionDate', '==', todayDate))
     : query(
         collection(db, 'sales'),
-        where('transactionDate', '==', todayDate),
-        where('recordedByUid', '==', userUid)
+        where('recordedByUid', '==', userUid),
+        where('transactionDate', '==', todayDate)
       );
-
   const atmQ = isAdmin
     ? query(collection(db, 'mini_atm_transactions'), where('transactionDate', '==', todayDate))
     : query(
         collection(db, 'mini_atm_transactions'),
-        where('transactionDate', '==', todayDate),
-        where('recordedByUid', '==', userUid)
+        where('recordedByUid', '==', userUid),
+        where('transactionDate', '==', todayDate)
       );
-
   const ppobQ = isAdmin
     ? query(collection(db, 'ppob_transactions'), where('transactionDate', '==', todayDate))
     : query(
         collection(db, 'ppob_transactions'),
-        where('transactionDate', '==', todayDate),
-        where('recordedByUid', '==', userUid)
-      );
-
-  const expQ = isAdmin
-    ? query(collection(db, 'expenses'), where('transactionDate', '==', todayDate))
-    : query(
-        collection(db, 'expenses'),
-        where('transactionDate', '==', todayDate),
-        where('recordedByUid', '==', userUid)
+        where('recordedByUid', '==', userUid),
+        where('transactionDate', '==', todayDate)
       );
 
   const unsubs: Unsubscribe[] = [
@@ -402,13 +392,15 @@ export function subscribeTodayDashboardMetrics(
           const data = d.data();
           if (data.status === 'completed') {
             total += Number(data.totalAmount || 0);
-            profit += Number(data.totalProfit || 0);
+            if (isAdmin) {
+              profit += Number(data.totalProfit || 0);
+            }
             qrisFee += Number(data.qrisFeeAmount || 0);
             count += 1;
           }
         });
         state.retailSalesTotal = total;
-        state.retailProfitTotal = profit;
+        state.retailProfitTotal = isAdmin ? profit : 0;
         state.retailQrisFeeTotal = Number(qrisFee.toFixed(2));
         state.retailSalesCount = count;
         emit();
@@ -425,12 +417,14 @@ export function subscribeTodayDashboardMetrics(
           const data = d.data();
           if (data.status === 'completed') {
             volume += Number(data.principalAmount || 0);
-            profit += Number(data.netProfit || 0);
+            if (isAdmin) {
+              profit += Number(data.netProfit || 0);
+            }
             count += 1;
           }
         });
         state.miniAtmVolumeTotal = volume;
-        state.miniAtmProfitTotal = profit;
+        state.miniAtmProfitTotal = isAdmin ? profit : 0;
         state.miniAtmCount = count;
         emit();
       },
@@ -446,31 +440,39 @@ export function subscribeTodayDashboardMetrics(
           const data = d.data();
           if (data.status === 'completed') {
             sales += Number(data.sellPrice || 0);
-            profit += Number(data.netProfit || 0);
+            if (isAdmin) {
+              profit += Number(data.netProfit || 0);
+            }
             count += 1;
           }
         });
         state.ppobSalesTotal = sales;
-        state.ppobProfitTotal = profit;
+        state.ppobProfitTotal = isAdmin ? profit : 0;
         state.ppobCount = count;
         emit();
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'ppob_transactions')
     ),
-    onSnapshot(
-      expQ,
-      (snap) => {
-        let total = 0;
-        snap.forEach((d) => {
-          total += Number(d.data().amount || 0);
-        });
-        state.expensesTotal = total;
-        state.expensesCount = snap.size;
-        emit();
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'expenses')
-    ),
   ];
+
+  if (isAdmin) {
+    const expQ = query(collection(db, 'expenses'), where('transactionDate', '==', todayDate));
+    unsubs.push(
+      onSnapshot(
+        expQ,
+        (snap) => {
+          let total = 0;
+          snap.forEach((d) => {
+            total += Number(d.data().amount || 0);
+          });
+          state.expensesTotal = total;
+          state.expensesCount = snap.size;
+          emit();
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'expenses')
+      )
+    );
+  }
 
   return () => {
     unsubs.forEach((u) => u());

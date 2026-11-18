@@ -229,14 +229,19 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
       }
     );
 
-    const unsubAudits = subscribeMiniAtmFeeAudits(
-      isAdmin,
-      user.uid,
-      (rows) => setFeeAudits(rows),
-      () => {
-        // Silent fallback if index/rules pending
-      }
-    );
+    const unsubAudits = isAdmin
+      ? subscribeMiniAtmFeeAudits(
+          true,
+          user.uid,
+          (rows) => setFeeAudits(rows),
+          () => {
+            // Silent fallback if index/rules pending
+          }
+        )
+      : (() => {
+          setFeeAudits([]);
+          return () => {};
+        })();
 
     return () => {
       unsubTx();
@@ -708,7 +713,7 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
           <div className="text-xs text-slate-500">
-            {isAdmin ? 'Transaksi Hari Ini (Toko)' : 'Transaksi Hari Ini (Saya)'}
+            {isAdmin ? 'Transaksi Hari Ini (Toko)' : 'Transaksi Mini ATM Saya Hari Ini'}
           </div>
           <div className="font-mono-num text-xl font-bold text-slate-900">
             {todayStats.count} Transaksi
@@ -1554,7 +1559,7 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
               <p className="text-xs text-slate-500">
                 {isAdmin
                   ? 'Pisahkan riwayat Tarik Tunai dan Transfer Bank, periksa bukti transfer, dan filter per kasir.'
-                  : 'Menampilkan riwayat Tarik Tunai & Transfer Bank yang Anda tangani.'}
+                  : 'Hanya menampilkan riwayat Tarik Tunai & Transfer Bank yang Anda catat.'}
               </p>
             </div>
 

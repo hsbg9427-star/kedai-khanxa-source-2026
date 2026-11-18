@@ -40,8 +40,15 @@ export const RESET_OPTIONS_META: ResetOptionMeta[] = [
     title: '1. Reset Seluruh Data Produk dan Stok',
     shortLabel: 'Data Produk & Stok',
     description:
-      'Menghapus seluruh master produk, riwayat harga beli/jual/grosir, dan log mutasi stok barang.',
-    targetCollections: ['products', 'price_history', 'stock_movements'],
+      'Menghapus seluruh master produk, kunci identitas produk, batch kedaluwarsa, riwayat harga beli/jual/grosir, dan log mutasi stok barang.',
+    targetCollections: [
+      'products',
+      'product_identity_locks',
+      'barcode_locks',
+      'stock_batches',
+      'price_history',
+      'stock_movements',
+    ],
     safeCollections: ['categories', 'store_settings', 'users', 'staff_invites'],
     requiresTypedPhrase: false,
     dangerBadge: 'Tinggi',
@@ -124,8 +131,8 @@ export const RESET_OPTIONS_META: ResetOptionMeta[] = [
     title: '8. Reset Seluruh Riwayat Stok dan Batch FIFO',
     shortLabel: 'Riwayat Stok & Batch',
     description:
-      'Menghapus seluruh log mutasi stok masuk/keluar dan riwayat harga, serta mengosongkan saldo stok seluruh produk menjadi 0 tanpa menghapus nama produk.',
-    targetCollections: ['stock_movements', 'price_history'],
+      'Menghapus seluruh log mutasi stok masuk/keluar, batch kedaluwarsa, dan riwayat harga, serta mengosongkan saldo stok seluruh produk menjadi 0 tanpa menghapus nama produk.',
+    targetCollections: ['stock_movements', 'stock_batches', 'price_history'],
     safeCollections: ['products (master produk tetap ada, stok = 0)', 'categories', 'store_settings'],
     requiresTypedPhrase: false,
     dangerBadge: 'Tinggi',
@@ -136,9 +143,12 @@ export const RESET_OPTIONS_META: ResetOptionMeta[] = [
     title: '9. Reset Semua Data Operasional Sekaligus',
     shortLabel: 'Semua Data Operasional',
     description:
-      'MENGHAPUS SEMUA DATA OPERASIONAL SEKALIGUS: seluruh produk, stok, pembelian, penjualan, saldo kas/bank, kasbon, pelanggan, pinjaman, Mini ATM, dan PPOB. Aplikasi kembali bersih untuk operasional baru.',
+      'MENGHAPUS SEMUA DATA OPERASIONAL SEKALIGUS: seluruh produk, batch kedaluwarsa, stok, pembelian, penjualan, saldo kas/bank, kasbon, pelanggan, pinjaman, Mini ATM, dan PPOB. Aplikasi kembali bersih untuk operasional baru.',
     targetCollections: [
       'products',
+      'product_identity_locks',
+      'barcode_locks',
+      'stock_batches',
       'price_history',
       'stock_movements',
       'purchases',
@@ -174,6 +184,7 @@ export const RESET_OPTIONS_META: ResetOptionMeta[] = [
 
 export interface ResetTargetCounts {
   products: number;
+  stock_batches: number;
   price_history: number;
   stock_movements: number;
   purchases: number;
@@ -196,6 +207,7 @@ export interface ResetTargetCounts {
 export async function fetchResetTargetCounts(): Promise<ResetTargetCounts> {
   const collections = [
     'products',
+    'stock_batches',
     'price_history',
     'stock_movements',
     'purchases',
@@ -236,7 +248,12 @@ export function computeOptionTargetCount(
 ): number {
   switch (optionId) {
     case 'products_stock':
-      return (counts.products || 0) + (counts.price_history || 0) + (counts.stock_movements || 0);
+      return (
+        (counts.products || 0) +
+        (counts.stock_batches || 0) +
+        (counts.price_history || 0) +
+        (counts.stock_movements || 0)
+      );
     case 'purchases_history':
       return (
         (counts.purchases || 0) +
@@ -264,7 +281,11 @@ export function computeOptionTargetCount(
     case 'ppob':
       return counts.ppob_transactions || 0;
     case 'stock_fifo_history':
-      return (counts.stock_movements || 0) + (counts.price_history || 0);
+      return (
+        (counts.stock_movements || 0) +
+        (counts.stock_batches || 0) +
+        (counts.price_history || 0)
+      );
     case 'all_operational':
       return Object.values(counts).reduce((sum, n) => sum + (Number(n) || 0), 0);
     default:
@@ -292,7 +313,14 @@ export async function exportOperationalBackup(
 
   const collectionsToExport: string[] = [];
   if (resetType === 'products_stock' || resetType === 'all_operational') {
-    collectionsToExport.push('products', 'price_history', 'stock_movements');
+    collectionsToExport.push(
+      'products',
+      'stock_batches',
+      'product_identity_locks',
+      'barcode_locks',
+      'price_history',
+      'stock_movements'
+    );
   }
   if (resetType === 'purchases_history' || resetType === 'all_operational') {
     collectionsToExport.push('purchases', 'supplier_payments', 'purchase_returns', 'suppliers');
@@ -313,7 +341,7 @@ export async function exportOperationalBackup(
     collectionsToExport.push('ppob_transactions');
   }
   if (resetType === 'stock_fifo_history' && !collectionsToExport.includes('stock_movements')) {
-    collectionsToExport.push('stock_movements', 'price_history');
+    collectionsToExport.push('stock_movements', 'stock_batches', 'price_history');
   }
 
   const uniqueCollections = Array.from(new Set(collectionsToExport));
@@ -551,6 +579,21 @@ export async function executeDataReset(params: {
         await writer.addDelete(doc(db, 'products', prodDoc.id));
       }
 
+      const idLockSnap = await getDocs(collection(db, 'product_identity_locks'));
+      for (const lDoc of idLockSnap.docs) {
+        await writer.addDelete(doc(db, 'product_identity_locks', lDoc.id));
+      }
+
+      const bcLockSnap = await getDocs(collection(db, 'barcode_locks'));
+      for (const bDoc of bcLockSnap.docs) {
+        await writer.addDelete(doc(db, 'barcode_locks', bDoc.id));
+      }
+
+      const batchSnap = await getDocs(collection(db, 'stock_batches'));
+      for (const btDoc of batchSnap.docs) {
+        await writer.addDelete(doc(db, 'stock_batches', btDoc.id));
+      }
+
       const priceSnap = await getDocs(collection(db, 'price_history'));
       for (const prDoc of priceSnap.docs) {
         await writer.addDelete(doc(db, 'price_history', prDoc.id));
@@ -562,7 +605,7 @@ export async function executeDataReset(params: {
       }
 
       logDetails.push(
-        `Produk: ${prodSnap.size} produk, ${priceSnap.size} riwayat harga, dan ${moveSnap.size} log stok dihapus.`
+        `Produk: ${prodSnap.size} produk, ${batchSnap.size} batch stok, ${priceSnap.size} riwayat harga, dan ${moveSnap.size} log stok dihapus.`
       );
     } catch (e) {
       errors.push(`Koleksi produk & stok: ${String(e)}`);
@@ -572,6 +615,11 @@ export async function executeDataReset(params: {
       const moveSnap = await getDocs(collection(db, 'stock_movements'));
       for (const mvDoc of moveSnap.docs) {
         await writer.addDelete(doc(db, 'stock_movements', mvDoc.id));
+      }
+
+      const batchSnap = await getDocs(collection(db, 'stock_batches'));
+      for (const btDoc of batchSnap.docs) {
+        await writer.addDelete(doc(db, 'stock_batches', btDoc.id));
       }
 
       const priceSnap = await getDocs(collection(db, 'price_history'));
@@ -588,7 +636,7 @@ export async function executeDataReset(params: {
       }
 
       logDetails.push(
-        `Riwayat Stok FIFO: ${moveSnap.size} log mutasi & ${priceSnap.size} riwayat harga dihapus. Stok pada ${prodSnap.size} produk direset ke 0.`
+        `Riwayat Stok FIFO: ${moveSnap.size} log mutasi, ${batchSnap.size} batch kedaluwarsa, & ${priceSnap.size} riwayat harga dihapus. Stok pada ${prodSnap.size} produk direset ke 0.`
       );
     } catch (e) {
       errors.push(`Koleksi riwayat stok: ${String(e)}`);

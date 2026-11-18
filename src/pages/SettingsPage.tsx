@@ -6,11 +6,14 @@ import {
   Database,
   Download,
   FileText,
+  FolderPlus,
   History,
+  Plus,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
   Smartphone,
+  Tag,
   Trash2,
   X,
 } from 'lucide-react';
@@ -18,7 +21,9 @@ import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
 import { firebaseProjectInfo } from '../firebase';
 import type {
+  Category,
   HppMethod,
+  Product,
   ResetAuditLog,
   ResetOptionType,
   StoreSetting,
@@ -37,7 +42,13 @@ import {
   type ResetOptionMeta,
   type ResetTargetCounts,
 } from '../services/resetService';
-import type { RecordedSaleReceipt } from '../services/inventoryService';
+import {
+  CategoryValidationError,
+  createCategory,
+  findDuplicateCategory,
+  normalizeCategoryName,
+  type RecordedSaleReceipt,
+} from '../services/inventoryService';
 import { getReadableFirestoreError } from '../utils/firestoreError';
 import { DEFAULT_QRIS_FEE_PERCENT, getEffectiveQrisFeePercent } from '../utils/qrisFee';
 import { formatQty, formatRupiah } from '../utils/formatters';
@@ -45,9 +56,15 @@ import { formatPosReceiptText, formatWhatsAppReceiptMessage } from '../utils/pos
 
 interface SettingsPageProps {
   storeSetting: StoreSetting | null;
+  categories?: Category[];
+  products?: Product[];
 }
 
-export function SettingsPage({ storeSetting }: SettingsPageProps) {
+export function SettingsPage({
+  storeSetting,
+  categories = [],
+  products = [],
+}: SettingsPageProps) {
   const { user, profile, isAdmin } = useAuth();
   const { isOnline, firestoreStatus, offlinePersistenceEnabled, recheckConnection } = useNetwork();
 
@@ -92,6 +109,14 @@ export function SettingsPage({ storeSetting }: SettingsPageProps) {
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [resetResult, setResetResult] = useState<ResetExecutionResult | null>(null);
   const [auditLogs, setAuditLogs] = useState<ResetAuditLog[]>([]);
+
+  // 3. State Modul Tambah Kategori Produk Baru (Hanya Admin)
+  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
+  const [newCatName, setNewCatName] = useState('');
+  const [newCatDesc, setNewCatDesc] = useState('');
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [catModalError, setCatModalError] = useState<string | null>(null);
+  const [catSearch, setCatSearch] = useState('');
 
   useEffect(() => {
     if (storeSetting) {
@@ -289,6 +314,79 @@ export function SettingsPage({ storeSetting }: SettingsPageProps) {
     }
   };
 
+  // Manajemen Kategori Produk & Validasi Duplikasi
+  const normalizedCatName = useMemo(() => normalizeCategoryName(newCatName), [newCatName]);
+  const duplicateCategory = useMemo(
+    () => findDuplicateCategory(newCatName, categories),
+    [newCatName, categories]
+  );
+
+  const productCountByCategory = useMemo(() => {
+    const counts = new Map<string, number>();
+    products.forEach((p) => {
+      counts.set(p.categoryId, (counts.get(p.categoryId) || 0) + 1);
+    });
+    return counts;
+  }, [products]);
+
+  const filteredCategories = useMemo(() => {
+    const q = catSearch.trim().toLowerCase();
+    if (!q) return categories;
+    return categories.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        (c.description || '').toLowerCase().includes(q)
+    );
+  }, [categories, catSearch]);
+
+  const handleOpenCategoryModal = () => {
+    if (!isAdmin) return;
+    setNewCatName('');
+    setNewCatDesc('');
+    setCatModalError(null);
+    setIsCategoryModalOpen(true);
+  };
+
+  const handleCreateCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !isAdmin) return;
+
+    if (!normalizedCatName) {
+      setCatModalError('Nama kategori wajib diisi.');
+      return;
+    }
+
+    if (duplicateCategory) {
+      setCatModalError(
+        `Kategori "${duplicateCategory.name}" sudah terdaftar. Gunakan nama kategori lain.`
+      );
+      return;
+    }
+
+    setSavingCategory(true);
+    setCatModalError(null);
+    try {
+      await createCategory(normalizedCatName, newCatDesc, user.uid, categories);
+      setIsCategoryModalOpen(false);
+      setNewCatName('');
+      setNewCatDesc('');
+      setFeedback({
+        kind: 'ok',
+        text: isOnline
+          ? `Kategori produk "${normalizedCatName}" berhasil ditambahkan.`
+          : `Kategori produk "${normalizedCatName}" disimpan lokal dan akan disinkronkan saat online.`,
+      });
+    } catch (error) {
+      if (error instanceof CategoryValidationError) {
+        setCatModalError(error.message);
+      } else {
+        setCatModalError(getReadableFirestoreError(error));
+      }
+    } finally {
+      setSavingCategory(false);
+    }
+  };
+
   // Buka Modal Konfirmasi Reset
   const handleOpenConfirm = (opt: ResetOptionMeta) => {
     setSelectedOption(opt);
@@ -340,6 +438,18 @@ export function SettingsPage({ storeSetting }: SettingsPageProps) {
       setIsResetting(false);
     }
   };
+
+  if (!isAdmin) {
+    return (
+      <div className="bg-white border border-red-200 rounded-xl p-6 text-sm text-red-700 flex items-center gap-3">
+        <ShieldAlert className="w-5 h-5 shrink-0" />
+        <span>
+          Akses ditolak. Pengaturan Aplikasi, Konfigurasi Sistem, dan Reset Data hanya dapat
+          diakses oleh Admin.
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-12">
@@ -700,6 +810,82 @@ export function SettingsPage({ storeSetting }: SettingsPageProps) {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Bagian 3B: Manajemen Kategori Produk */}
+      <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate-100 pb-4">
+          <div className="space-y-0.5">
+            <h3 className="font-display font-semibold text-base text-slate-900 flex items-center gap-2">
+              <Tag className="w-4 h-4 text-emerald-700" />
+              <span>Kategori Produk</span>
+              <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-mono-num text-[11px] font-semibold">
+                {categories.length}
+              </span>
+            </h3>
+            <p className="text-xs text-slate-500">
+              Kelola daftar kategori barang untuk pengelompokan di menu Produk &amp; Kasir.
+            </p>
+          </div>
+
+          {isAdmin ? (
+            <button
+              type="button"
+              onClick={handleOpenCategoryModal}
+              className="min-h-[42px] inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-emerald-700 text-white text-xs sm:text-sm font-medium hover:bg-emerald-800 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Tambah Kategori Baru</span>
+            </button>
+          ) : (
+            <span className="text-xs text-slate-500">
+              Hanya Admin yang dapat menambahkan kategori baru.
+            </span>
+          )}
+        </div>
+
+        {categories.length > 5 && (
+          <div>
+            <input
+              type="text"
+              value={catSearch}
+              onChange={(e) => setCatSearch(e.target.value)}
+              placeholder="Cari kategori..."
+              aria-label="Cari kategori produk"
+              className="w-full sm:w-72 min-h-[40px] px-3.5 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+            />
+          </div>
+        )}
+
+        {filteredCategories.length === 0 ? (
+          <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-500 text-center">
+            {categories.length === 0
+              ? 'Belum ada kategori produk tersimpan.'
+              : `Tidak ada kategori yang cocok dengan "${catSearch}".`}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {filteredCategories.map((cat) => {
+              const count = productCountByCategory.get(cat.id) || 0;
+              return (
+                <div
+                  key={cat.id}
+                  className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 flex items-start justify-between gap-3"
+                >
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="text-sm font-semibold text-slate-900 truncate">{cat.name}</div>
+                    {cat.description && (
+                      <div className="text-xs text-slate-500 line-clamp-2">{cat.description}</div>
+                    )}
+                  </div>
+                  <span className="px-2 py-0.5 rounded bg-white border border-slate-200 font-mono-num text-[11px] font-medium text-slate-700 shrink-0">
+                    {count} produk
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Bagian 4: ZONA BAHAYA - RESET DATA KEDAI KHANXA (HANYA ADMIN) */}
@@ -1213,6 +1399,133 @@ export function SettingsPage({ storeSetting }: SettingsPageProps) {
                 Tutup Laporan
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dialog Tambah Kategori Produk Baru (Khusus Admin) */}
+      {isCategoryModalOpen && isAdmin && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="modal-add-cat-title"
+        >
+          <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full overflow-hidden shadow-xl">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-700 shrink-0">
+                  <FolderPlus className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3
+                    id="modal-add-cat-title"
+                    className="font-display font-semibold text-base text-slate-900"
+                  >
+                    Tambah Kategori Produk
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Nama kategori dicek otomatis agar tidak duplikat.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCategoryModalOpen(false)}
+                disabled={savingCategory}
+                className="w-9 h-9 rounded-lg flex items-center justify-center text-slate-500 hover:bg-slate-100 cursor-pointer"
+                aria-label="Tutup Dialog Kategori"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateCategory} className="p-5 space-y-4">
+              {catModalError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{catModalError}</span>
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="settings-cat-name" className="block text-xs font-medium text-slate-700">
+                    Nama Kategori <span className="text-red-600">*</span>
+                  </label>
+                  <span className="text-[11px] font-mono-num text-slate-400">
+                    {normalizedCatName.length}/60
+                  </span>
+                </div>
+                <input
+                  id="settings-cat-name"
+                  type="text"
+                  required
+                  autoFocus
+                  maxLength={60}
+                  disabled={savingCategory}
+                  value={newCatName}
+                  onChange={(e) => {
+                    setNewCatName(e.target.value);
+                    if (catModalError) setCatModalError(null);
+                  }}
+                  placeholder="Contoh: Alat Tulis & Kertas"
+                  className={`w-full min-h-[44px] px-3.5 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 ${
+                    duplicateCategory
+                      ? 'border-red-400 bg-red-50/40 focus:ring-red-500'
+                      : 'border-slate-300 focus:ring-emerald-600'
+                  }`}
+                />
+                {duplicateCategory && (
+                  <p className="text-xs text-red-600 font-medium flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      Kategori &quot;{duplicateCategory.name}&quot; sudah terdaftar. Gunakan nama lain.
+                    </span>
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="settings-cat-desc" className="block text-xs font-medium text-slate-700">
+                    Keterangan (Opsional)
+                  </label>
+                  <span className="text-[11px] font-mono-num text-slate-400">
+                    {newCatDesc.length}/200
+                  </span>
+                </div>
+                <textarea
+                  id="settings-cat-desc"
+                  rows={2}
+                  maxLength={200}
+                  disabled={savingCategory}
+                  value={newCatDesc}
+                  onChange={(e) => setNewCatDesc(e.target.value)}
+                  placeholder="Contoh: Buku tulis, pulpen, map, dan perlengkapan sekolah"
+                  className="w-full px-3.5 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsCategoryModalOpen(false)}
+                  disabled={savingCategory}
+                  className="min-h-[42px] px-4 py-2 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingCategory || !normalizedCatName || Boolean(duplicateCategory)}
+                  className="min-h-[42px] inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-emerald-700 text-white text-xs sm:text-sm font-medium hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>{savingCategory ? 'Menyimpan...' : 'Simpan Kategori'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

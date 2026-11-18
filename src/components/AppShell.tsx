@@ -19,26 +19,15 @@ import {
   Smartphone,
   Truck,
   ClipboardCheck,
+  Calculator,
 } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
 import { getRoleLabel } from '../utils/formatters';
+import { canAccessNavTab, type NavTab } from '../utils/rbac';
 
-export type NavTab =
-  | 'dashboard'
-  | 'pos'
-  | 'mini_atm'
-  | 'ppob'
-  | 'products'
-  | 'stock_opname'
-  | 'purchases'
-  | 'customers'
-  | 'loans'
-  | 'accounts'
-  | 'reports'
-  | 'users'
-  | 'settings';
+export type { NavTab };
 
 interface AppShellProps {
   activeTab: NavTab;
@@ -63,22 +52,23 @@ export function AppShell({ activeTab, onSelectTab, storeName, children }: AppShe
     { id: 'pos', label: 'Kasir Retail', mobileLabel: 'Kasir', icon: ShoppingCart },
     { id: 'mini_atm', label: 'Mini ATM', mobileLabel: 'Mini ATM', icon: Landmark },
     { id: 'ppob', label: 'Transaksi PPOB', mobileLabel: 'PPOB', icon: Smartphone },
-    { id: 'products', label: 'Produk & Stok', mobileLabel: 'Produk', icon: Package },
-    { id: 'stock_opname', label: 'Stok Opname', mobileLabel: 'Opname', icon: ClipboardCheck },
+    { id: 'products', label: 'Produk & Stok', mobileLabel: 'Produk', icon: Package, adminOnly: true },
+    { id: 'stock_opname', label: 'Stok Opname', mobileLabel: 'Opname', icon: ClipboardCheck, adminOnly: true },
     { id: 'purchases', label: 'Pembelian Barang', mobileLabel: 'Kulakan', icon: Truck, adminOnly: true },
     { id: 'customers', label: 'Pelanggan & Piutang', mobileLabel: 'Kasbon', icon: BookUser },
+    { id: 'closing', label: 'Closing Kasir', mobileLabel: 'Closing', icon: Calculator },
     { id: 'loans', label: 'Pinjaman Uang', mobileLabel: 'Pinjaman', icon: HandCoins, adminOnly: true },
     { id: 'accounts', label: 'Kas & Rekening', mobileLabel: 'Kas', icon: Wallet, adminOnly: true },
     { id: 'reports', label: 'Laporan Keuangan', mobileLabel: 'Laporan', icon: FileBarChart2, adminOnly: true },
     { id: 'users', label: 'Pengguna & Akses', mobileLabel: 'Staf', icon: Users, adminOnly: true },
-    { id: 'settings', label: 'Pengaturan', mobileLabel: 'Atur', icon: Settings },
+    { id: 'settings', label: 'Pengaturan', mobileLabel: 'Atur', icon: Settings, adminOnly: true },
   ];
 
-  const visibleNavItems = navItems.filter((item) => !item.adminOnly || isAdmin);
+  const visibleNavItems = navItems.filter((item) => canAccessNavTab(item.id, isAdmin));
   const mobileBottomItems = visibleNavItems.filter((item) =>
     isAdmin
       ? ['dashboard', 'pos', 'mini_atm', 'ppob', 'reports'].includes(item.id)
-      : ['dashboard', 'pos', 'mini_atm', 'ppob', 'products'].includes(item.id)
+      : ['dashboard', 'pos', 'mini_atm', 'ppob', 'closing'].includes(item.id)
   );
   const currentTitle = visibleNavItems.find((i) => i.id === activeTab)?.label || 'Dashboard';
 

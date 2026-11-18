@@ -660,7 +660,7 @@ export function subscribePpobTransactions(
     : query(
         collection(db, 'ppob_transactions'),
         where('recordedByUid', '==', userUid),
-        limit(150)
+        limit(200)
       );
 
   return onSnapshot(

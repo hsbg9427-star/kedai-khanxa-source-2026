@@ -18,7 +18,16 @@ import { MiniAtmPage } from './pages/MiniAtmPage';
 import { PpobPage } from './pages/PpobPage';
 import { PurchasesPage } from './pages/PurchasesPage';
 import { StockOpnamePage } from './pages/StockOpnamePage';
-import type { Account, Category, Customer, Product, StoreSetting } from './types/database';
+import { ClosingKasirPage } from './pages/ClosingKasirPage';
+import { canAccessNavTab, resolveSafeNavTab } from './utils/rbac';
+import type {
+  Account,
+  Category,
+  Customer,
+  Product,
+  StockBatch,
+  StoreSetting,
+} from './types/database';
 import {
   subscribeAccounts,
   subscribeStoreSettings,
@@ -30,6 +39,7 @@ import {
   subscribeCategories,
   subscribeProducts,
 } from './services/inventoryService';
+import { subscribeStockBatches } from './services/batchService';
 import { subscribeCustomers } from './services/receivableService';
 import { getTodayDateString } from './utils/formatters';
 
@@ -67,13 +77,26 @@ function AuthenticatedWorkspace() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customersLoading, setCustomersLoading] = useState(true);
   const [customersPendingWrites, setCustomersPendingWrites] = useState(false);
+  const [stockBatches, setStockBatches] = useState<StockBatch[]>([]);
+  const [batchesPendingWrites, setBatchesPendingWrites] = useState(false);
 
   const [metrics, setMetrics] = useState<TodayDashboardMetrics>(INITIAL_METRICS);
   const seededDefaultsRef = useRef(false);
 
   useEffect(() => {
-    markPendingWrite(accountsPendingWrites || productsPendingWrites || customersPendingWrites);
-  }, [accountsPendingWrites, productsPendingWrites, customersPendingWrites, markPendingWrite]);
+    markPendingWrite(
+      accountsPendingWrites ||
+        productsPendingWrites ||
+        customersPendingWrites ||
+        batchesPendingWrites
+    );
+  }, [
+    accountsPendingWrites,
+    productsPendingWrites,
+    customersPendingWrites,
+    batchesPendingWrites,
+    markPendingWrite,
+  ]);
 
   useEffect(() => {
     if (!user || !isActiveStaff) {
@@ -127,6 +150,14 @@ function AuthenticatedWorkspace() {
       () => setCustomersLoading(false)
     );
 
+    const unsubBatches = subscribeStockBatches(
+      (list, pending) => {
+        setStockBatches(list);
+        setBatchesPendingWrites(pending);
+      },
+      () => {}
+    );
+
     const unsubMetrics = subscribeTodayDashboardMetrics(
       todayDate,
       user.uid,
@@ -140,6 +171,7 @@ function AuthenticatedWorkspace() {
       unsubCategories();
       unsubProducts();
       unsubCustomers();
+      unsubBatches();
       unsubMetrics();
     };
   }, [user, isActiveStaff, isAdmin]);
@@ -164,9 +196,12 @@ function AuthenticatedWorkspace() {
     return <PendingAccessPage />;
   }
 
-  // Pastikan Kasir tidak membuka tab admin-only
-  const adminOnlyTabs: NavTab[] = ['purchases', 'users', 'loans', 'accounts', 'reports'];
-  const safeTab: NavTab = !isAdmin && adminOnlyTabs.includes(activeTab) ? 'dashboard' : activeTab;
+  // Pastikan Kasir tidak dapat membuka tab admin-only lewat rute/state apa pun
+  const safeTab: NavTab = resolveSafeNavTab(activeTab, isAdmin);
+
+  const handleNavigate = (tab: NavTab) => {
+    setActiveTab(resolveSafeNavTab(tab, isAdmin));
+  };
 
   const computedLowStockCount = products.filter(
     (p) => p.isActive && p.stock <= p.minStock
@@ -181,7 +216,7 @@ function AuthenticatedWorkspace() {
   return (
     <AppShell
       activeTab={safeTab}
-      onSelectTab={setActiveTab}
+      onSelectTab={handleNavigate}
       storeName={storeName}
     >
       {safeTab === 'dashboard' && (
@@ -191,8 +226,9 @@ function AuthenticatedWorkspace() {
           accountsLoading={accountsLoading}
           customers={customers}
           products={products}
+          stockBatches={stockBatches}
           metrics={liveMetrics}
-          onNavigate={setActiveTab}
+          onNavigate={handleNavigate}
         />
       )}
       {safeTab === 'pos' && (
@@ -202,6 +238,7 @@ function AuthenticatedWorkspace() {
           accounts={accounts}
           customers={customers}
           storeSetting={storeSetting}
+          stockBatches={stockBatches}
         />
       )}
       {safeTab === 'mini_atm' && (
@@ -210,16 +247,17 @@ function AuthenticatedWorkspace() {
       {safeTab === 'ppob' && (
         <PpobPage accounts={accounts} storeSetting={storeSetting} />
       )}
-      {safeTab === 'products' && (
+      {safeTab === 'products' && canAccessNavTab('products', isAdmin) && isAdmin && (
         <ProductsPage
           products={products}
           categories={categories}
+          stockBatches={stockBatches}
           loading={productsLoading}
           hasPendingWrites={productsPendingWrites}
           storeName={storeName}
         />
       )}
-      {safeTab === 'stock_opname' && (
+      {safeTab === 'stock_opname' && canAccessNavTab('stock_opname', isAdmin) && isAdmin && (
         <StockOpnamePage
           products={products}
           categories={categories}
@@ -227,7 +265,12 @@ function AuthenticatedWorkspace() {
         />
       )}
       {safeTab === 'purchases' && isAdmin && (
-        <PurchasesPage products={products} accounts={accounts} storeSetting={storeSetting} />
+        <PurchasesPage
+          products={products}
+          accounts={accounts}
+          storeSetting={storeSetting}
+          stockBatches={stockBatches}
+        />
       )}
       {safeTab === 'customers' && (
         <CustomersPage
@@ -237,6 +280,7 @@ function AuthenticatedWorkspace() {
           accounts={accounts}
         />
       )}
+      {safeTab === 'closing' && <ClosingKasirPage accounts={accounts} />}
       {safeTab === 'loans' && isAdmin && <LoansPage accounts={accounts} />}
       {safeTab === 'accounts' && isAdmin && (
         <AccountsPage
@@ -252,10 +296,17 @@ function AuthenticatedWorkspace() {
           storeSetting={storeSetting}
           products={products}
           categories={categories}
+          stockBatches={stockBatches}
         />
       )}
       {safeTab === 'users' && isAdmin && <UsersPage />}
-      {safeTab === 'settings' && <SettingsPage storeSetting={storeSetting} />}
+      {safeTab === 'settings' && canAccessNavTab('settings', isAdmin) && isAdmin && (
+        <SettingsPage
+          storeSetting={storeSetting}
+          categories={categories}
+          products={products}
+        />
+      )}
     </AppShell>
   );
 }

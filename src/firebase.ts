@@ -22,6 +22,7 @@ function createFirestoreInstance(): { db: Firestore; offlinePersistenceEnabled: 
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager(),
         }),
+        experimentalForceLongPolling: true,
       },
       firebaseConfig.firestoreDatabaseId
     );
@@ -31,7 +32,10 @@ function createFirestoreInstance(): { db: Firestore; offlinePersistenceEnabled: 
     try {
       const fallbackDb = initializeFirestore(
         app,
-        { localCache: memoryLocalCache() },
+        {
+          localCache: memoryLocalCache(),
+          experimentalForceLongPolling: true,
+        },
         firebaseConfig.firestoreDatabaseId
       );
       return { db: fallbackDb, offlinePersistenceEnabled: false };
@@ -57,20 +61,52 @@ export const firebaseProjectInfo = {
   authDomain: firebaseConfig.authDomain,
 };
 
+function isOfflineOrUnavailableError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code || '';
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    code === 'unavailable' ||
+    message.includes('the client is offline') ||
+    message.includes('unavailable') ||
+    message.includes('network')
+  );
+}
+
+function isPermissionDeniedError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code || '';
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    code === 'permission-denied' ||
+    message.includes('Missing or insufficient permissions') ||
+    message.includes('permission-denied')
+  );
+}
+
 export async function testFirestoreConnection(): Promise<'connected' | 'offline' | 'error'> {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    return 'connected';
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('the client is offline')) {
-      console.error('Koneksi Firestore offline. Periksa konfigurasi Firebase.');
-      return 'offline';
-    }
-    // Permission denied pada /test/connection menandakan server Firestore berhasil dijangkau.
-    if (message.includes('Missing or insufficient permissions') || message.includes('permission-denied')) {
-      return 'connected';
-    }
-    return 'error';
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return 'offline';
   }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await getDocFromServer(doc(db, 'test', 'connection'));
+      return 'connected';
+    } catch (error) {
+      // Permission denied pada /test/connection menandakan server Firestore berhasil dijangkau.
+      if (isPermissionDeniedError(error)) {
+        return 'connected';
+      }
+      if (isOfflineOrUnavailableError(error)) {
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+        console.warn('Koneksi Firestore sedang offline atau tidak stabil. Beroperasi dalam mode lokal.');
+        return 'offline';
+      }
+      return 'error';
+    }
+  }
+
+  return 'offline';
 }

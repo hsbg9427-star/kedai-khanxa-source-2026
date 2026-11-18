@@ -29,6 +29,7 @@ export interface PurchaseDraftLineInput {
   quantity: number;
   unitCost: number;
   lineDiscount?: number;
+  actualExpiryDate?: string;
 }
 
 export interface ComputedPurchaseLine {
@@ -49,6 +50,7 @@ export interface ComputedPurchaseLine {
   stockAfter: number;
   hppBefore: number;
   hppAfter: number;
+  actualExpiryDate?: string;
 }
 
 export interface ComputedProductUpdate {
@@ -93,6 +95,7 @@ export function computePurchaseDraft(
     grossSubtotal: number;
     lineDiscount: number;
     afterLineDiscount: number;
+    actualExpiryDate?: string;
   }
 
   const prelim: PrelimLine[] = inputs.map((item, idx) => {
@@ -141,6 +144,7 @@ export function computePurchaseDraft(
       grossSubtotal,
       lineDiscount,
       afterLineDiscount,
+      actualExpiryDate: item.actualExpiryDate,
     };
   });
 
@@ -238,6 +242,7 @@ export function computePurchaseDraft(
       stockAfter,
       hppBefore,
       hppAfter,
+      actualExpiryDate: l.actualExpiryDate,
     };
   });
 

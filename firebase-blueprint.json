@@ -81,12 +81,16 @@
     },
     "Product": {
       "title": "Product",
-      "description": "Master produk mini retail.",
+      "description": "Master produk mini retail dengan identitas merek/varian dan kunci anti-duplikasi.",
       "type": "object",
       "properties": {
         "sku": { "type": "string", "minLength": 1, "maxLength": 40 },
         "barcode": { "type": "string", "maxLength": 64 },
         "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "brand": { "type": "string", "maxLength": 60 },
+        "variant": { "type": "string", "maxLength": 80 },
+        "identityKey": { "type": "string", "maxLength": 64 },
+        "barcodeKey": { "type": "string", "maxLength": 64 },
         "photoDataUrl": { "type": "string", "maxLength": 80000 },
         "categoryId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "categoryName": { "type": "string", "minLength": 1, "maxLength": 60 },
@@ -185,6 +189,10 @@
         "netReceivedAmount": { "type": "number" },
         "accountId": { "type": "string", "maxLength": 128 },
         "qrisAccountId": { "type": "string", "maxLength": 128 },
+        "expiredOverrideApproved": { "type": "boolean" },
+        "expiredOverrideByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "expiredOverrideByName": { "type": "string", "maxLength": 100 },
+        "expiredOverrideReason": { "type": "string", "maxLength": 200 },
         "status": { "type": "string", "enum": ["completed", "void"] },
         "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
@@ -726,6 +734,112 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["opnameId", "productId", "sku", "productName", "categoryId", "categoryName", "baseUnit", "costPrice", "systemStockAtStart", "systemStockAtCount", "movementSinceStart", "physicalUnitName", "physicalUnitQty", "varianceBase", "varianceStatus", "isCounted", "recordedByUid", "updatedAt"]
+    },
+    "StockBatch": {
+      "title": "StockBatch",
+      "description": "Kelompok stok per penerimaan/pembelian dengan tanggal kedaluwarsa perkiraan +6 bulan dan aktual kemasan independen.",
+      "type": "object",
+      "properties": {
+        "batchNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "productBrand": { "type": "string", "maxLength": 60 },
+        "productVariant": { "type": "string", "maxLength": 80 },
+        "baseUnit": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "sourceType": { "type": "string", "enum": ["purchase", "initial_product", "manual_stock", "excel_import"] },
+        "sourceRefId": { "type": "string", "maxLength": 128 },
+        "sourceNumber": { "type": "string", "maxLength": 40 },
+        "supplierName": { "type": "string", "maxLength": 120 },
+        "startDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "estimatedExpiryDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "actualExpiryDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "effectiveExpiryDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "initialBaseQty": { "type": "number" },
+        "remainingBaseQty": { "type": "number" },
+        "costPerBaseUnit": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "depleted", "pulled", "handled"] },
+        "handlingNotes": { "type": "string", "maxLength": 240 },
+        "handledDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "handledByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "handledByName": { "type": "string", "maxLength": 100 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["batchNumber", "productId", "productName", "baseUnit", "sourceType", "startDate", "estimatedExpiryDate", "effectiveExpiryDate", "initialBaseQty", "remainingBaseQty", "status", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "ProductIdentityLock": {
+      "title": "ProductIdentityLock",
+      "description": "Kunci keunikan identitas produk (nama + merek + varian ternormalisasi) untuk mencegah produk ganda lintas perangkat.",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "normalizedIdentity": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["productId", "productName", "normalizedIdentity", "createdByUid", "createdAt"]
+    },
+    "BarcodeLock": {
+      "title": "BarcodeLock",
+      "description": "Kunci keunikan barcode ternormalisasi untuk mencegah barcode ganda lintas perangkat.",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "barcode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "normalizedBarcode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["productId", "barcode", "normalizedBarcode", "createdByUid", "createdAt"]
+    },
+    "CashierClosing": {
+      "title": "CashierClosing",
+      "description": "Rekapitulasi closing kasir dan verifikasi uang fisik per periode/shift.",
+      "type": "object",
+      "properties": {
+        "transactionNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "transactionDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "transactionTime": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "shiftLabel": { "type": "string", "maxLength": 60 },
+        "periodStartDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "periodEndDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "openingCash": { "type": "number" },
+        "totalSalesAmount": { "type": "number" },
+        "retailTxCount": { "type": "number" },
+        "retailCashIn": { "type": "number" },
+        "retailQrisTotal": { "type": "number" },
+        "retailTransferTotal": { "type": "number" },
+        "retailDebtCreatedTotal": { "type": "number" },
+        "miniAtmTxCount": { "type": "number" },
+        "miniAtmCashIn": { "type": "number" },
+        "miniAtmCashOut": { "type": "number" },
+        "miniAtmNonCashTotal": { "type": "number" },
+        "ppobTxCount": { "type": "number" },
+        "ppobCashIn": { "type": "number" },
+        "ppobNonCashTotal": { "type": "number" },
+        "receivablePaymentCount": { "type": "number" },
+        "receivableCashIn": { "type": "number" },
+        "receivableNonCashIn": { "type": "number" },
+        "expectedCash": { "type": "number" },
+        "actualCash": { "type": "number" },
+        "varianceAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["balance", "short", "over"] },
+        "notes": { "type": "string", "maxLength": 300 },
+        "isFinalized": { "type": "boolean" },
+        "reviewStatus": { "type": "string", "enum": ["pending", "verified", "flagged"] },
+        "reviewNote": { "type": "string", "maxLength": 300 },
+        "reviewedByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reviewedByName": { "type": "string", "maxLength": 100 },
+        "reviewedAtDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transactionNumber", "transactionDate", "transactionTime", "periodStartDate", "periodEndDate", "openingCash", "totalSalesAmount", "retailTxCount", "retailCashIn", "retailQrisTotal", "retailTransferTotal", "retailDebtCreatedTotal", "miniAtmTxCount", "miniAtmCashIn", "miniAtmCashOut", "miniAtmNonCashTotal", "ppobTxCount", "ppobCashIn", "ppobNonCashTotal", "receivablePaymentCount", "receivableCashIn", "receivableNonCashIn", "expectedCash", "actualCash", "varianceAmount", "status", "isFinalized", "reviewStatus", "recordedByUid", "recordedByName", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -848,6 +962,22 @@
     "/stock_opnames/{opnameId}/items/{itemId}": {
       "schema": { "$ref": "#/entities/StockOpnameItem" },
       "description": "Rincian produk yang diperiksa dalam sesi stok opname."
+    },
+    "/stock_batches/{batchId}": {
+      "schema": { "$ref": "#/entities/StockBatch" },
+      "description": "Batch stok produk beserta tanggal kedaluwarsa perkiraan +6 bulan dan aktual kemasan."
+    },
+    "/product_identity_locks/{lockId}": {
+      "schema": { "$ref": "#/entities/ProductIdentityLock" },
+      "description": "Kunci unik identitas produk untuk validasi anti-duplikasi lintas perangkat."
+    },
+    "/barcode_locks/{lockId}": {
+      "schema": { "$ref": "#/entities/BarcodeLock" },
+      "description": "Kunci unik barcode produk untuk validasi anti-duplikasi lintas perangkat."
+    },
+    "/cashier_closings/{closingId}": {
+      "schema": { "$ref": "#/entities/CashierClosing" },
+      "description": "Rekap closing kasir dan penghitungan uang fisik yang bersifat final dan diaudit Admin."
     }
   }
 }

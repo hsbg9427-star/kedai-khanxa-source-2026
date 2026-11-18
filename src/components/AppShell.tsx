@@ -22,6 +22,7 @@ import {
   Calculator,
 } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
+import { PWAInstallButton } from './PWAInstallButton';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
 import { getRoleLabel } from '../utils/formatters';
@@ -143,7 +144,7 @@ export function AppShell({ activeTab, onSelectTab, storeName, children }: AppShe
           })}
         </nav>
 
-        <div className="p-4 border-t border-slate-200 space-y-3">
+        <div className="p-4 border-t border-slate-200 space-y-2.5">
           <div className="text-xs text-slate-500 space-y-0.5">
             <div className="font-medium text-slate-900 truncate">
               {profile?.displayName || user?.displayName || 'Pengguna'}
@@ -153,6 +154,7 @@ export function AppShell({ activeTab, onSelectTab, storeName, children }: AppShe
               {profile?.shiftLabel ? ` · ${profile.shiftLabel}` : ''}
             </div>
           </div>
+          <PWAInstallButton variant="full" showFallbackGuide />
           <button
             type="button"
             onClick={signOutUser}
@@ -209,13 +211,14 @@ export function AppShell({ activeTab, onSelectTab, storeName, children }: AppShe
                 );
               })}
             </nav>
-            <div className="p-4 border-t border-slate-200 space-y-3">
+            <div className="p-4 border-t border-slate-200 space-y-2.5">
               <div className="text-xs text-slate-500">
                 <div className="font-medium text-slate-900 truncate">
                   {profile?.displayName || user?.displayName}
                 </div>
                 <div className="truncate">{profile?.email || user?.email}</div>
               </div>
+              <PWAInstallButton variant="full" showFallbackGuide />
               <button
                 type="button"
                 onClick={signOutUser}
@@ -247,7 +250,8 @@ export function AppShell({ activeTab, onSelectTab, storeName, children }: AppShe
             </h1>
           </div>
 
-          <div className="flex items-center gap-4 text-xs text-slate-500 shrink-0">
+          <div className="flex items-center gap-3 text-xs text-slate-500 shrink-0">
+            <PWAInstallButton variant="compact" />
             <span className="hidden sm:inline truncate max-w-[180px]">{storeName}</span>
             <span className="hidden sm:inline" aria-hidden="true">·</span>
             {renderSyncStatus()}

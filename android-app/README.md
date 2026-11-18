@@ -56,4 +56,34 @@ Agar Login Google (`Credential Manager` + Firebase Auth) berjalan di APK:
 - Setelah selesai, klik **locate** untuk mengambil file `.apk` (`android-app/app/build/outputs/apk/debug/app-debug.apk`).
 - Kirim file `.apk` tersebut ke HP Admin & HP Kasir lalu pasang (*Install*).
 
-> **Catatan:** Karena container AI Studio Web hanya memiliki runtime Node.js/Vite (tanpa JDK/Gradle/Android SDK), proyek di `android-app/` belum dikompilasi di server dan baru dikompilasi saat Anda membukanya di Android Studio.
+> **Catatan:** Karena container AI Studio Web hanya memiliki runtime Node.js/Vite (tanpa JDK/Gradle/Android SDK), proyek di `android-app/` belum dikompilasi di server dan baru dikompilasi melalui **GitHub Actions** (tanpa PC) atau **Android Studio** di PC.
+
+---
+
+## Langkah Build `.APK` Tanpa PC (Lewat Browser HP + GitHub Actions, Gratis Rp0)
+
+Sudah tersedia dua workflow di `.github/workflows/`:
+1. `generate-android-keystore.yml` — membuat keystore penanda tangan APK + mencetak **SHA-1 & SHA-256** tanpa perlu `keytool`/PC.
+2. `build-android-apk.yml` — mengompilasi `android-app/` menggunakan Gradle 8.9 dan menghasilkan file `.apk` siap unduh di tab **Actions → Artifacts**.
+
+### Urutan Langkah dari HP:
+1. **Upload Proyek ke GitHub Private Repo:**
+   - Buat repositori baru bertipe **Private** di GitHub (gratis), lalu upload isi proyek ini.
+2. **Buat Keystore & Ambil SHA-1 / SHA-256:**
+   - Buka tab **Actions** di GitHub → pilih **Generate Android Keystore (Tanpa PC)** → klik **Run workflow**.
+   - Setelah selesai, buka ringkasan (*Summary*) run tersebut untuk menyalin **SHA-1** & **SHA-256**, lalu unduh artifact `khanxa-keystore-bundle` untuk mengambil isi `keystore_base64.txt`.
+3. **Daftarkan Aplikasi Android di Firebase Console:**
+   - Buka project **`flash-lead-kwpgt`** → **Project Settings → Add app (Android)**.
+   - Isi package name **`com.kedaikhanxa.app`** beserta **SHA-1** dan **SHA-256** dari langkah 2.
+   - Unduh file **`google-services.json`**.
+4. **Simpan Secrets di GitHub:**
+   - Di repo GitHub masuk ke **Settings → Secrets and variables → Actions → New repository secret**, lalu tambahkan:
+     - `GOOGLE_SERVICES_JSON`: *(tempel seluruh isi file `google-services.json`)*
+     - `KEYSTORE_BASE64`: *(isi teks `keystore_base64.txt`)*
+     - `KEYSTORE_PASSWORD`: *(password dari ringkasan langkah 2)*
+     - `KEY_ALIAS`: `kedaikhanxa` *(atau alias yang Anda pilih)*
+     - `KEY_PASSWORD`: *(sama dengan `KEYSTORE_PASSWORD`)*
+   - *(Demi keamanan, hapus history workflow run `Generate Android Keystore` setelah secrets tersimpan).*
+5. **Compile & Unduh `.APK` di HP:**
+   - Buka tab **Actions** → **Build Android APK (Kedai Khanxa)** → klik **Run workflow**.
+   - Tunggu ~3–5 menit hingga centang hijau, lalu unduh file **`.apk`** di bagian **Artifacts** paling bawah halaman run dan pasang di HP Admin / Kasir.

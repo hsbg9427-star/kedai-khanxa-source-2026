@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { NetworkProvider, useNetwork } from './contexts/NetworkContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AppShell, type NavTab } from './components/AppShell';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { LoginPage } from './pages/LoginPage';
 import { PendingAccessPage } from './pages/PendingAccessPage';
 import { DashboardPage } from './pages/DashboardPage';
@@ -338,6 +339,7 @@ export default function App() {
       <NetworkProvider>
         <AuthProvider>
           <AppContent />
+          <OfflineIndicator />
         </AuthProvider>
       </NetworkProvider>
     </ErrorBoundary>

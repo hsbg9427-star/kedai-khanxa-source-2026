@@ -1,0 +1,161 @@
+name: Build Android APK (Kedai Khanxa)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_variant:
+        description: "Pilih jenis APK (auto = signed release jika KEYSTORE_BASE64 ada, else debug)"
+        type: choice
+        required: true
+        default: "auto"
+        options:
+          - auto
+          - release
+          - debug
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "android-app/**"
+      - ".github/workflows/build-android-apk.yml"
+
+jobs:
+  build-apk:
+    name: Compile Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Siapkan google-services.json
+        id: google_services
+        shell: bash
+        env:
+          GOOGLE_SERVICES_SECRET: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          set -euo pipefail
+          TARGET="android-app/app/google-services.json"
+          if [ -n "${GOOGLE_SERVICES_SECRET:-}" ]; then
+            TRIMMED=$(echo "$GOOGLE_SERVICES_SECRET" | sed -e 's/^[[:space:]]*//')
+            if [[ "$TRIMMED" == \{* ]]; then
+              printf '%s' "$GOOGLE_SERVICES_SECRET" > "$TARGET"
+            else
+              printf '%s' "$GOOGLE_SERVICES_SECRET" | tr -d '\n\r ' | base64 -d > "$TARGET"
+            fi
+            echo "google-services.json berhasil dibuat dari GitHub Secret GOOGLE_SERVICES_JSON."
+          elif [ -f "$TARGET" ]; then
+            echo "Menggunakan android-app/app/google-services.json yang sudah ada di repositori."
+          else
+            {
+              echo "## google-services.json Belum Tersedia"
+              echo "Aplikasi Firebase Android membutuhkan \`google-services.json\` sebelum dikompilasi:"
+              echo "1. Daftarkan aplikasi Android \`com.kedaikhanxa.app\` di Firebase Console (\`flash-lead-kwpgt\`)."
+              echo "2. Unduh \`google-services.json\`."
+              echo "3. Simpan isinya sebagai GitHub Secret bernama \`GOOGLE_SERVICES_JSON\` (atau upload ke \`android-app/app/google-services.json\` pada repo Private)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Error: google-services.json tidak ditemukan. Silakan isi GitHub Secret GOOGLE_SERVICES_JSON." >&2
+            exit 1
+          fi
+
+      - name: Tentukan Varian Build & Siapkan Keystore
+        id: signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          REQUESTED="${{ github.event.inputs.build_variant || 'auto' }}"
+          HAS_KEYSTORE="false"
+          if [ -n "${KEYSTORE_BASE64:-}" ] && [ -n "${KEYSTORE_PASSWORD:-}" ]; then
+            HAS_KEYSTORE="true"
+          fi
+          if [ "$REQUESTED" = "release" ] && [ "$HAS_KEYSTORE" != "true" ]; then
+            echo "Error: Varian release membutuhkan GitHub Secrets KEYSTORE_BASE64 dan KEYSTORE_PASSWORD." >&2
+            exit 1
+          fi
+          if [ "$REQUESTED" = "release" ] || { [ "$REQUESTED" = "auto" ] && [ "$HAS_KEYSTORE" = "true" ]; }; then
+            echo "variant=release" >> "$GITHUB_OUTPUT"
+            echo "gradle_task=assembleRelease" >> "$GITHUB_OUTPUT"
+            printf '%s' "$KEYSTORE_BASE64" | tr -d '\n\r ' | base64 -d > /tmp/khanxa-release.jks
+            ALIAS="${KEY_ALIAS:-kedaikhanxa}"
+            KPASS="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+            echo "ANDROID_KEYSTORE_PATH=/tmp/khanxa-release.jks" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=$KPASS" >> "$GITHUB_ENV"
+
+            CERT_INFO=$(keytool -list -v -keystore /tmp/khanxa-release.jks -alias "$ALIAS" -storepass "$KEYSTORE_PASSWORD")
+            echo "sha1=$(echo "$CERT_INFO" | awk -F'SHA1: ' '/SHA1:/{print $2}' | xargs)" >> "$GITHUB_OUTPUT"
+            echo "sha256=$(echo "$CERT_INFO" | awk -F'SHA256: ' '/SHA256:/{print $2}' | xargs)" >> "$GITHUB_OUTPUT"
+          else
+            echo "variant=debug" >> "$GITHUB_OUTPUT"
+            echo "gradle_task=assembleDebug" >> "$GITHUB_OUTPUT"
+            mkdir -p "$HOME/.android"
+            if [ ! -f "$HOME/.android/debug.keystore" ]; then
+              keytool -genkeypair -v \
+                -keystore "$HOME/.android/debug.keystore" \
+                -alias androiddebugkey \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -storepass android \
+                -keypass android \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+            CERT_INFO=$(keytool -list -v -keystore "$HOME/.android/debug.keystore" -alias androiddebugkey -storepass android)
+            echo "sha1=$(echo "$CERT_INFO" | awk -F'SHA1: ' '/SHA1:/{print $2}' | xargs)" >> "$GITHUB_OUTPUT"
+            echo "sha256=$(echo "$CERT_INFO" | awk -F'SHA256: ' '/SHA256:/{print $2}' | xargs)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compile APK dengan Gradle
+        working-directory: android-app
+        run: gradle --no-daemon ${{ steps.signing.outputs.gradle_task }}
+
+      - name: Kemas File APK Hasil Build
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VARIANT="${{ steps.signing.outputs.variant }}"
+          mkdir -p apk-output
+          if [ "$VARIANT" = "release" ]; then
+            SRC="android-app/app/build/outputs/apk/release/app-release.apk"
+            DEST="apk-output/KedaiKhanxa-release.apk"
+          else
+            SRC="android-app/app/build/outputs/apk/debug/app-debug.apk"
+            DEST="apk-output/KedaiKhanxa-debug.apk"
+          fi
+          cp "$SRC" "$DEST"
+          echo "apk_name=$(basename "$DEST")" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Build APK Kedai Khanxa Berhasil"
+            echo "- **Varian:** \`$VARIANT\`"
+            echo "- **File APK:** \`$(basename "$DEST")\` (unduh dari bagian **Artifacts** di bawah)"
+            echo "- **SHA-1 Penanda Tangan APK:** \`${{ steps.signing.outputs.sha1 }}\`"
+            echo "- **SHA-256 Penanda Tangan APK:** \`${{ steps.signing.outputs.sha256 }}\`"
+            echo ""
+            echo "> Pastikan nilai SHA-1 dan SHA-256 di atas sudah terdaftar di **Firebase Console -> Project Settings -> Your apps -> com.kedaikhanxa.app** agar Login Google berjalan di HP."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload File APK (Siap Unduh di HP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: kedai-khanxa-${{ steps.signing.outputs.variant }}-apk
+          path: apk-output/${{ steps.pkg.outputs.apk_name }}
+          retention-days: 14

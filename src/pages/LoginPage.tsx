@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShieldCheck, UserCheck, Wifi, WifiOff, ArrowRight } from 'lucide-react';
 import { BrandLogo } from '../components/BrandLogo';
+import { PWAInstallButton } from '../components/PWAInstallButton';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
 
@@ -126,6 +127,8 @@ export function LoginPage() {
             <span>{authBusy ? 'Memproses Login...' : 'Masuk dengan Google'}</span>
             <ArrowRight className="w-4 h-4" />
           </button>
+
+          <PWAInstallButton variant="full" showFallbackGuide />
 
           {!isOnline && (
             <p className="text-xs text-amber-700 text-center">

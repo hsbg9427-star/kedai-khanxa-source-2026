@@ -5,6 +5,7 @@ import type {
   MiniAtmSetting,
   MiniAtmTransaction,
   PpobTransaction,
+  ServicePaymentStatus,
 } from '../types/database';
 import { formatRupiah } from './formatters';
 import { roundMoney } from './unitConversion';
@@ -296,6 +297,8 @@ export function getPpobStatusLabel(status: PpobStatus): string {
 export interface MiniAtmBreakdownInput {
   serviceType: MiniAtmServiceType;
   paymentChannel?: MiniAtmPaymentChannel;
+  paymentStatus?: ServicePaymentStatus;
+  paidAmount?: number;
   allowQrisTarikTunai?: boolean;
   qrisVerified?: boolean;
   qrisMdrRate?: number;
@@ -311,6 +314,7 @@ export interface MiniAtmBreakdownInput {
 export interface MiniAtmBreakdownResult {
   serviceType: MiniAtmServiceType;
   paymentChannel: MiniAtmPaymentChannel;
+  paymentStatus: ServicePaymentStatus;
   principalAmount: number;
   adminFee: number;
   bankFee: number;
@@ -320,6 +324,9 @@ export interface MiniAtmBreakdownResult {
   totalCustomerFee: number;
   netProfit: number;
   customerTotal: number;
+  totalDue: number;
+  paidAmount: number;
+  debtAmount: number;
   cashDelta: number;
   cashDirection: 'in' | 'out';
   cashLedgerAmount: number;
@@ -334,6 +341,7 @@ export function calculateMiniAtmBreakdown(input: MiniAtmBreakdownInput): MiniAtm
   const bankFee = roundMoney(Number(input.bankFee) || 0);
   const paymentChannel: MiniAtmPaymentChannel =
     input.paymentChannel === 'qris' ? 'qris' : 'bank_transfer';
+  const paymentStatus: ServicePaymentStatus = input.paymentStatus === 'debt' ? 'debt' : 'paid';
 
   if (!Number.isFinite(principalAmount) || principalAmount <= 0) {
     throw new Error('Nominal pokok transaksi Mini ATM harus lebih dari Rp0.');
@@ -346,6 +354,11 @@ export function calculateMiniAtmBreakdown(input: MiniAtmBreakdownInput): MiniAtm
   }
 
   if (paymentChannel === 'qris') {
+    if (paymentStatus === 'debt') {
+      throw new Error(
+        'Pembayaran QRIS hanya dapat digunakan untuk transaksi Lunas. Pilih jalur Non-QRIS untuk status Hutang.'
+      );
+    }
     if (input.serviceType !== 'tarik_tunai') {
       throw new Error('Pembayaran QRIS pada Mini ATM hanya tersedia untuk layanan Tarik Tunai.');
     }
@@ -398,8 +411,45 @@ export function calculateMiniAtmBreakdown(input: MiniAtmBreakdownInput): MiniAtm
         'Nominal penarikan harus lebih besar daripada potongan biaya tambahan internal.'
       );
     }
-    // Biaya tambahan internal (jika MDR > Rp500) dipotong langsung dari saldo yang di-QRIS-kan pelanggan,
-    // sehingga tunai yang diserahkan kepada pelanggan = principalAmount - internalExtraFee, ditambah jasa warung adminFee.
+
+    if (paymentStatus === 'debt') {
+      const totalDue = roundMoney(principalAmount + adminFee);
+      const rawPaid = roundMoney(Math.max(0, Number(input.paidAmount) || 0));
+      if (rawPaid >= totalDue) {
+        throw new Error(
+          'Nominal bayar DP sama dengan atau melebihi total tagihan. Pilih status Lunas jika sudah dibayar penuh.'
+        );
+      }
+      const debtAmount = roundMoney(totalDue - rawPaid);
+      const cashDelta = roundMoney(-principalAmount + rawPaid);
+
+      return {
+        serviceType: input.serviceType,
+        paymentChannel: 'bank_transfer',
+        paymentStatus: 'debt',
+        principalAmount,
+        adminFee,
+        bankFee,
+        qrisMdrRate: 0,
+        qrisMdrAmount: 0,
+        internalExtraFee: 0,
+        totalCustomerFee: adminFee,
+        netProfit: roundMoney(adminFee - bankFee),
+        customerTotal: principalAmount,
+        totalDue,
+        paidAmount: rawPaid,
+        debtAmount,
+        cashDelta,
+        cashDirection: cashDelta >= 0 ? 'in' : 'out',
+        cashLedgerAmount: roundMoney(Math.abs(cashDelta)),
+        bankDelta: 0,
+        bankDirection: 'in',
+        bankLedgerAmount: 0,
+      };
+    }
+
+    // Lunas via QRIS / Kartu / Transfer ke rekening warung:
+    // Tunai yang diserahkan = principalAmount - internalExtraFee, ditambah jasa warung adminFee.
     // Rekening bank / settlement QRIS warung menerima principalAmount dikurangi biaya bank & MDR QRIS.
     const customerTotal = roundMoney(principalAmount - internalExtraFee);
     const cashDelta = roundMoney(-customerTotal + adminFee);
@@ -408,6 +458,7 @@ export function calculateMiniAtmBreakdown(input: MiniAtmBreakdownInput): MiniAtm
     return {
       serviceType: input.serviceType,
       paymentChannel,
+      paymentStatus: 'paid',
       principalAmount,
       adminFee,
       bankFee,
@@ -417,6 +468,9 @@ export function calculateMiniAtmBreakdown(input: MiniAtmBreakdownInput): MiniAtm
       totalCustomerFee,
       netProfit,
       customerTotal,
+      totalDue: customerTotal,
+      paidAmount: customerTotal,
+      debtAmount: 0,
       cashDelta,
       cashDirection: cashDelta >= 0 ? 'in' : 'out',
       cashLedgerAmount: roundMoney(Math.abs(cashDelta)),
@@ -427,15 +481,52 @@ export function calculateMiniAtmBreakdown(input: MiniAtmBreakdownInput): MiniAtm
   }
 
   // Transfer Bank (serta kompatibilitas riwayat Setor Tunai lama):
-  // Pelanggan menyerahkan tunai (pokok + jasa warung) ke Laci Kas,
-  // sementara Rekening sumber dana warung mentransfer (pokok + biaya bank).
+  // Total tagihan ke pelanggan = pokok + jasa warung.
+  // Jika Lunas: pelanggan bayar penuh ke Laci Kas; jika Hutang: pelanggan bayar DP (0..total-1) dan sisanya masuk Bon/Piutang.
   const customerTotal = roundMoney(principalAmount + adminFee);
-  const cashDelta = customerTotal;
   const bankDelta = roundMoney(-(principalAmount + bankFee));
+
+  if (paymentStatus === 'debt') {
+    const rawPaid = roundMoney(Math.max(0, Number(input.paidAmount) || 0));
+    if (rawPaid >= customerTotal) {
+      throw new Error(
+        'Nominal bayar DP sama dengan atau melebihi total tagihan. Pilih status Lunas jika sudah dibayar penuh.'
+      );
+    }
+    const debtAmount = roundMoney(customerTotal - rawPaid);
+    const cashDelta = rawPaid;
+
+    return {
+      serviceType: input.serviceType,
+      paymentChannel: 'bank_transfer',
+      paymentStatus: 'debt',
+      principalAmount,
+      adminFee,
+      bankFee,
+      qrisMdrRate: 0,
+      qrisMdrAmount: 0,
+      internalExtraFee: 0,
+      totalCustomerFee: adminFee,
+      netProfit: roundMoney(adminFee - bankFee),
+      customerTotal,
+      totalDue: customerTotal,
+      paidAmount: rawPaid,
+      debtAmount,
+      cashDelta,
+      cashDirection: 'in',
+      cashLedgerAmount: cashDelta,
+      bankDelta,
+      bankDirection: 'out',
+      bankLedgerAmount: roundMoney(Math.abs(bankDelta)),
+    };
+  }
+
+  const cashDelta = customerTotal;
 
   return {
     serviceType: input.serviceType,
     paymentChannel: 'bank_transfer',
+    paymentStatus: 'paid',
     principalAmount,
     adminFee,
     bankFee,
@@ -445,6 +536,9 @@ export function calculateMiniAtmBreakdown(input: MiniAtmBreakdownInput): MiniAtm
     totalCustomerFee: adminFee,
     netProfit: roundMoney(adminFee - bankFee),
     customerTotal,
+    totalDue: customerTotal,
+    paidAmount: customerTotal,
+    debtAmount: 0,
     cashDelta,
     cashDirection: 'in',
     cashLedgerAmount: cashDelta,
@@ -458,13 +552,18 @@ export interface PpobBreakdownInput {
   capitalPrice: number;
   sellPrice: number;
   adminFee: number;
+  paymentStatus?: ServicePaymentStatus;
+  paidAmount?: number;
 }
 
 export interface PpobBreakdownResult {
   capitalPrice: number;
   sellPrice: number;
   adminFee: number;
+  paymentStatus: ServicePaymentStatus;
   customerTotal: number;
+  paidAmount: number;
+  debtAmount: number;
   netProfit: number;
   depositDelta: number;
   cashReceiptDelta: number;
@@ -474,6 +573,7 @@ export function calculatePpobBreakdown(input: PpobBreakdownInput): PpobBreakdown
   const capitalPrice = roundMoney(Number(input.capitalPrice) || 0);
   const sellPrice = roundMoney(Number(input.sellPrice) || 0);
   const adminFee = roundMoney(Number(input.adminFee) || 0);
+  const paymentStatus: ServicePaymentStatus = input.paymentStatus === 'debt' ? 'debt' : 'paid';
 
   if (!Number.isFinite(capitalPrice) || capitalPrice < 0) {
     throw new Error('Harga modal deposit PPOB tidak boleh bernilai negatif.');
@@ -490,15 +590,35 @@ export function calculatePpobBreakdown(input: PpobBreakdownInput): PpobBreakdown
     throw new Error('Nominal transaksi PPOB harus lebih dari Rp0.');
   }
 
+  let paidAmount = customerTotal;
+  let debtAmount = 0;
+
+  if (paymentStatus === 'debt') {
+    const rawPaid = roundMoney(Math.max(0, Number(input.paidAmount) || 0));
+    if (customerTotal <= 0) {
+      throw new Error('Transaksi dengan total Rp0 tidak dapat dicatat sebagai Hutang.');
+    }
+    if (rawPaid >= customerTotal) {
+      throw new Error(
+        'Nominal bayar DP sama dengan atau melebihi total tagihan PPOB. Pilih status Lunas jika dibayar penuh.'
+      );
+    }
+    paidAmount = rawPaid;
+    debtAmount = roundMoney(customerTotal - rawPaid);
+  }
+
   const netProfit = roundMoney(customerTotal - capitalPrice);
 
   return {
     capitalPrice,
     sellPrice,
     adminFee,
+    paymentStatus,
     customerTotal,
+    paidAmount,
+    debtAmount,
     netProfit,
     depositDelta: roundMoney(-capitalPrice),
-    cashReceiptDelta: customerTotal,
+    cashReceiptDelta: paidAmount,
   };
 }

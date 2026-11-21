@@ -30,7 +30,14 @@ import type {
   StockMovement,
 } from '../types/database';
 import { buildStockBatchDocument } from './batchService';
-import { planFefoBatchDeduction } from '../utils/expiryUtils';
+import {
+  computeEstimatedExpiryDate,
+  getEffectiveExpiryDate,
+  isValidYmd,
+  planFefoBatchDeduction,
+  resolveDefaultProductExpiryInput,
+} from '../utils/expiryUtils';
+export { resolveDefaultProductExpiryInput };
 import {
   DUPLICATE_PRODUCT_WARNING,
   buildProductIdentityString,
@@ -49,7 +56,7 @@ import {
   getTodayDateString,
 } from '../utils/formatters';
 import {
-  calculateSaleSettlement,
+  calculateCombinedPosSettlement,
   DEFAULT_QRIS_FEE_PERCENT,
   type RetailPaymentMethod,
 } from '../utils/qrisFee';
@@ -318,6 +325,8 @@ export interface ProductPayload {
   sellUnits?: ProductSellUnit[];
   stock: number;
   minStock: number;
+  inputDate?: string;
+  expiryDate?: string;
   isActive: boolean;
   initialExpiryStartDate?: string;
   initialActualExpiryDate?: string;
@@ -521,6 +530,11 @@ export async function createProductWithInitialStock(
     throw new Error('Stok awal produk tidak boleh bernilai negatif.');
   }
 
+  const resolvedExpiry = resolveDefaultProductExpiryInput(
+    payload.inputDate || payload.initialExpiryStartDate,
+    payload.expiryDate || payload.initialActualExpiryDate
+  );
+
   const productId = generateSafeId('prd');
   const productRef = doc(db, 'products', productId);
   const cleanCost = roundMoney(Math.max(0, Number(payload.costPrice) || 0));
@@ -581,6 +595,8 @@ export async function createProductWithInitialStock(
       ...(cleanSellUnits.length > 0 ? { sellUnits: cleanSellUnits } : {}),
       stock: initialStock,
       minStock: roundQty(Math.max(0, Number(payload.minStock) || 0)),
+      inputDate: resolvedExpiry.inputDate,
+      expiryDate: resolvedExpiry.expiryDate,
       isActive: payload.isActive,
       createdByUid: user.uid,
       createdAt: serverTimestamp(),
@@ -614,7 +630,6 @@ export async function createProductWithInitialStock(
     if (initialStock > 0) {
       const moveId = generateSafeId('stk');
       const meta = createTransactionMetadata('STK', user);
-      const startDate = payload.initialExpiryStartDate || meta.transactionDate;
       const batchDoc = buildStockBatchDocument({
         productId,
         productName: cleanName,
@@ -624,8 +639,8 @@ export async function createProductWithInitialStock(
         sourceType: 'initial_product',
         sourceRefId: moveId,
         sourceNumber: meta.transactionNumber,
-        startDate,
-        actualExpiryDate: payload.initialActualExpiryDate,
+        startDate: resolvedExpiry.inputDate,
+        actualExpiryDate: resolvedExpiry.actualExpiryDate,
         initialBaseQty: initialStock,
         costPerBaseUnit: cleanCost,
         user,
@@ -683,7 +698,8 @@ export async function updateProductDetails(
   prevProduct: Product,
   payload: Omit<ProductPayload, 'stock'>,
   user: { uid: string; displayName: string },
-  existingProducts?: Product[]
+  existingProducts?: Product[],
+  syncInitialBatch?: StockBatch | null
 ): Promise<void> {
   const cleanName = normalizeDisplayText(payload.name).slice(0, 120);
   if (!cleanName) {
@@ -809,6 +825,33 @@ export async function updateProductDetails(
       updatedFields.wholesaleMinQty = cleanMinQty;
     } else if (prevProduct.wholesaleMinQty !== undefined) {
       updatedFields.wholesaleMinQty = deleteField();
+    }
+
+    const hasExpiryInput = Boolean(
+      payload.inputDate ||
+        payload.expiryDate ||
+        payload.initialExpiryStartDate ||
+        payload.initialActualExpiryDate
+    );
+    if (hasExpiryInput) {
+      const resolvedExpiry = resolveDefaultProductExpiryInput(
+        payload.inputDate || payload.initialExpiryStartDate || prevProduct.inputDate,
+        payload.expiryDate || payload.initialActualExpiryDate
+      );
+      updatedFields.inputDate = resolvedExpiry.inputDate;
+      updatedFields.expiryDate = resolvedExpiry.expiryDate;
+
+      if (syncInitialBatch && syncInitialBatch.productId === prevProduct.id) {
+        batch.update(doc(db, 'stock_batches', syncInitialBatch.id), {
+          startDate: resolvedExpiry.inputDate,
+          estimatedExpiryDate: resolvedExpiry.estimatedExpiryDate,
+          actualExpiryDate: resolvedExpiry.actualExpiryDate
+            ? resolvedExpiry.actualExpiryDate
+            : deleteField(),
+          effectiveExpiryDate: resolvedExpiry.expiryDate,
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
 
     batch.update(ref, updatedFields);
@@ -990,14 +1033,15 @@ export async function adjustProductStock(
 
   try {
     const batch = writeBatch(db);
-    batch.update(doc(db, 'products', product.id), {
-      stock: stockAfter,
-      updatedAt: serverTimestamp(),
-    });
-
     let referenceId: string | undefined;
+    let nextInputDate: string | undefined;
+    let nextExpiryDate: string | undefined;
+
     if (mode === 'in' && convertedBaseQty > 0) {
-      const startDate = batchOptions?.startDate || meta.transactionDate;
+      const startDate =
+        batchOptions?.startDate && isValidYmd(batchOptions.startDate)
+          ? batchOptions.startDate
+          : meta.transactionDate;
       const batchDoc = buildStockBatchDocument({
         productId: product.id,
         productName: product.name,
@@ -1015,6 +1059,10 @@ export async function adjustProductStock(
       });
       referenceId = batchDoc.id;
       batch.set(doc(db, 'stock_batches', batchDoc.id), batchDoc.data);
+      if (!product.expiryDate || Number(product.stock) <= 0.0001) {
+        nextInputDate = String(batchDoc.data.startDate);
+        nextExpiryDate = String(batchDoc.data.effectiveExpiryDate);
+      }
     } else if (mode === 'out' && batchOptions?.targetBatch && convertedBaseQty > 0) {
       const tb = batchOptions.targetBatch;
       const prevRem = Math.max(0, roundQty(Number(tb.remainingBaseQty) || 0));
@@ -1026,6 +1074,13 @@ export async function adjustProductStock(
         updatedAt: serverTimestamp(),
       });
     }
+
+    batch.update(doc(db, 'products', product.id), {
+      stock: stockAfter,
+      ...(nextInputDate ? { inputDate: nextInputDate } : {}),
+      ...(nextExpiryDate ? { expiryDate: nextExpiryDate } : {}),
+      updatedAt: serverTimestamp(),
+    });
 
     batch.set(doc(db, 'stock_movements', moveId), {
       ...meta,
@@ -1141,6 +1196,12 @@ export async function importProductsBatch(
           });
         }
 
+        const meta = createTransactionMetadata('IMP', user);
+        const resolvedExpiry = resolveDefaultProductExpiryInput(
+          meta.transactionDate,
+          row.actualExpiryDate
+        );
+
         batch.set(doc(db, 'products', productId), {
           sku: row.sku,
           ...(cleanBarcode ? { barcode: cleanBarcode } : {}),
@@ -1159,6 +1220,8 @@ export async function importProductsBatch(
           ...(cleanSellUnits.length > 0 ? { sellUnits: cleanSellUnits } : {}),
           stock: cleanStock,
           minStock: row.minStock,
+          inputDate: resolvedExpiry.inputDate,
+          expiryDate: resolvedExpiry.expiryDate,
           isActive: true,
           createdByUid: user.uid,
           createdAt: serverTimestamp(),
@@ -1186,7 +1249,6 @@ export async function importProductsBatch(
 
         if (cleanStock > 0) {
           const moveId = generateSafeId('stk');
-          const meta = createTransactionMetadata('IMP', user);
           const batchDoc = buildStockBatchDocument({
             productId,
             productName: cleanName,
@@ -1196,8 +1258,8 @@ export async function importProductsBatch(
             sourceType: 'excel_import',
             sourceRefId: moveId,
             sourceNumber: meta.transactionNumber,
-            startDate: meta.transactionDate,
-            actualExpiryDate: row.actualExpiryDate,
+            startDate: resolvedExpiry.inputDate,
+            actualExpiryDate: resolvedExpiry.actualExpiryDate,
             initialBaseQty: cleanStock,
             costPerBaseUnit: row.costPrice,
             user,
@@ -1319,6 +1381,9 @@ export interface RecordRetailSaleInput {
   qrisAccount?: Account | null;
   customer?: Customer | null;
   customerName?: string;
+  autoCreateCustomer?: boolean;
+  newCustomerPhone?: string;
+  receivablePayAmount?: number;
   batches?: StockBatch[];
   allowExpiredOverride?: boolean;
   expiredOverrideReason?: string;
@@ -1353,6 +1418,9 @@ export interface RecordedSaleReceipt {
   paidAmount: number;
   changeAmount: number;
   debtAmount: number;
+  receivablePaidAmount?: number;
+  customerDebtBefore?: number;
+  customerDebtAfter?: number;
   paymentMethod: RetailPaymentMethod;
   cashPaidPart: number;
   qrisAmount: number;
@@ -1383,8 +1451,18 @@ export async function recordRetailSale(
   } = computeCartDemandsAndTotals(input.items, input.discount);
 
   const isDebtSale = input.paymentMethod === 'debt';
-  if (isDebtSale && !input.customer) {
-    throw new Error('Pilih pelanggan terdaftar terlebih dahulu untuk transaksi Kasbon / Piutang.');
+  const cleanTypedCustomerName = (input.customerName || '').trim().slice(0, 100);
+  const cleanNewCustomerPhone = (input.newCustomerPhone || '').trim().slice(0, 24);
+  const willAutoCreateCustomer =
+    !input.customer &&
+    Boolean(input.autoCreateCustomer) &&
+    cleanTypedCustomerName.length > 0 &&
+    cleanTypedCustomerName.toLowerCase() !== 'umum';
+
+  if (isDebtSale && !input.customer && !willAutoCreateCustomer) {
+    throw new Error(
+      'Pilih atau ketik nama pelanggan terlebih dahulu untuk transaksi Kasbon / Piutang.'
+    );
   }
 
   // Validasi awal batch kedaluwarsa & susun rencana pemotongan FEFO
@@ -1408,205 +1486,316 @@ export async function recordRetailSale(
     }
   }
 
-  const settlement = calculateSaleSettlement({
-    totalAmount,
+  const initialPrevDebt = input.customer
+    ? roundMoney(Math.max(0, Number(input.customer.totalDebt) || 0))
+    : 0;
+  const requestedReceivablePay = roundMoney(Math.max(0, Number(input.receivablePayAmount) || 0));
+
+  const initialCombined = calculateCombinedPosSettlement({
+    saleTotalAmount: totalAmount,
     paymentMethod: input.paymentMethod,
     paidAmount: input.paidAmount,
     cashPart: input.cashPart,
     qrisPart: input.qrisPart,
     qrisFeePercent: input.qrisFeePercent ?? DEFAULT_QRIS_FEE_PERCENT,
+    customerPrevDebt: initialPrevDebt,
+    receivablePayAmount: requestedReceivablePay,
   });
 
   const cashAccount = input.account || null;
   const qrisTargetAccount =
-    input.paymentMethod === 'qris'
+    input.paymentMethod === 'qris' || input.paymentMethod === 'mixed'
       ? input.qrisAccount || input.account || null
-      : input.paymentMethod === 'mixed'
-        ? input.qrisAccount || input.account || null
-        : null;
+      : null;
 
-  if (settlement.cashDepositAmount > 0 && !cashAccount) {
+  const totalCashNeeded = roundMoney(
+    initialCombined.saleSettlement.cashDepositAmount + initialCombined.receivableCashIn
+  );
+  const totalQrisNeeded = roundMoney(
+    initialCombined.saleSettlement.qrisNetDepositAmount + initialCombined.receivableQrisIn
+  );
+
+  if (totalCashNeeded > 0 && !cashAccount) {
     throw new Error(
       isDebtSale
         ? 'Pilih akun kas/rekening untuk mencatat uang muka (DP) kasbon.'
         : 'Pilih akun kas/rekening penerima pembayaran.'
     );
   }
-  if (settlement.qrisNetDepositAmount > 0 && !qrisTargetAccount) {
+  if (totalQrisNeeded > 0 && !qrisTargetAccount) {
     throw new Error('Pilih rekening/akun QRIS penerima pembayaran.');
   }
 
   const saleId = generateSafeId('sale');
+  const resolvedCustomerId = input.customer?.id || (willAutoCreateCustomer ? generateSafeId('cst') : undefined);
   const meta = createTransactionMetadata('POS', user);
-  const effectiveCustomerName = (input.customer?.name || input.customerName || '')
-    .trim()
-    .slice(0, 100);
+  const effectiveCustomerName = (input.customer?.name || cleanTypedCustomerName).slice(0, 100);
+  const effectiveCustomerPhone = input.customer?.phone || (willAutoCreateCustomer ? cleanNewCustomerPhone : '');
   const cleanOverrideReason = (input.expiredOverrideReason || '').trim().slice(0, 200);
 
-  const buildSaleDocPayload = (usedExpiredFlag: boolean) => ({
-    ...meta,
-    ...(input.customer ? { customerId: input.customer.id } : {}),
-    ...(effectiveCustomerName ? { customerName: effectiveCustomerName } : {}),
-    totalItems,
-    subtotal,
-    discount,
-    totalAmount,
-    totalCost,
-    totalProfit,
-    paidAmount: settlement.paidAmount,
-    changeAmount: settlement.changeAmount,
-    debtAmount: settlement.debtAmount,
-    paymentMethod: input.paymentMethod,
-    cashPaidPart: settlement.cashPaidPart,
-    qrisAmount: settlement.qrisAmount,
-    qrisFeeRate: settlement.qrisFeeRate,
-    qrisFeeAmount: settlement.qrisFeeAmount,
-    netReceivedAmount: settlement.netReceivedAmount,
-    ...(cashAccount && settlement.cashDepositAmount > 0 ? { accountId: cashAccount.id } : {}),
-    ...(qrisTargetAccount && settlement.qrisAmount > 0
-      ? { qrisAccountId: qrisTargetAccount.id }
-      : {}),
-    ...(allowExpired && usedExpiredFlag
-      ? {
-          expiredOverrideApproved: true,
-          expiredOverrideByUid: user.uid,
-          expiredOverrideByName: user.displayName.trim().slice(0, 100) || 'Admin',
-          ...(cleanOverrideReason ? { expiredOverrideReason: cleanOverrideReason } : {}),
-        }
-      : {}),
-    status: 'completed',
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
+  const buildSaleDocPayload = (
+    usedExpiredFlag: boolean,
+    combined: ReturnType<typeof calculateCombinedPosSettlement>
+  ) => {
+    const s = combined.saleSettlement;
+    const includeDebtSummary =
+      combined.receivablePaidAmount > 0 || combined.customerDebtBefore > 0 || s.debtAmount > 0;
+    return {
+      ...meta,
+      ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
+      ...(effectiveCustomerName ? { customerName: effectiveCustomerName } : {}),
+      totalItems,
+      subtotal,
+      discount,
+      totalAmount,
+      totalCost,
+      totalProfit,
+      paidAmount: combined.grandPaidAmount,
+      changeAmount: combined.grandChangeAmount,
+      debtAmount: s.debtAmount,
+      paymentMethod: input.paymentMethod,
+      cashPaidPart: s.cashPaidPart,
+      qrisAmount: s.qrisAmount,
+      qrisFeeRate: s.qrisFeeRate,
+      qrisFeeAmount: s.qrisFeeAmount,
+      netReceivedAmount: s.netReceivedAmount,
+      ...(cashAccount && s.cashDepositAmount > 0 ? { accountId: cashAccount.id } : {}),
+      ...(qrisTargetAccount && s.qrisAmount > 0 ? { qrisAccountId: qrisTargetAccount.id } : {}),
+      ...(includeDebtSummary
+        ? {
+            receivablePaidAmount: combined.receivablePaidAmount,
+            customerDebtBefore: combined.customerDebtBefore,
+            customerDebtAfter: combined.customerDebtAfter,
+          }
+        : {}),
+      ...(allowExpired && usedExpiredFlag
+        ? {
+            expiredOverrideApproved: true,
+            expiredOverrideByUid: user.uid,
+            expiredOverrideByName: user.displayName.trim().slice(0, 100) || 'Admin',
+            ...(cleanOverrideReason ? { expiredOverrideReason: cleanOverrideReason } : {}),
+          }
+        : {}),
+      status: 'completed',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+  };
 
-  const applyAccountDeposits = (
+  const applyDepositsAndReceivables = (
     writer: {
       update: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
       set: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
     },
     cashAccState: Account | null,
-    qrisAccState: Account | null
+    qrisAccState: Account | null,
+    combined: ReturnType<typeof calculateCombinedPosSettlement>
   ) => {
-    const cashIn = settlement.cashDepositAmount;
-    const qrisNetIn = settlement.qrisNetDepositAmount;
+    const s = combined.saleSettlement;
+    const balCursor = new Map<string, number>();
+    const accStateMap = new Map<string, Account>();
 
-    if (
-      cashAccState &&
-      qrisAccState &&
-      cashAccState.id === qrisAccState.id &&
-      cashIn > 0 &&
-      qrisNetIn > 0
-    ) {
-      const bal0 = roundMoney(Number(cashAccState.balance) || 0);
-      const bal1 = roundMoney(bal0 + cashIn);
-      const bal2 = roundMoney(bal1 + qrisNetIn);
-
-      writer.update(doc(db, 'accounts', cashAccState.id), {
-        balance: bal2,
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
-      });
-
-      writer.set(doc(db, 'cash_ledger', generateSafeId('ldg1')), {
-        ...meta,
-        transactionNumber: `${meta.transactionNumber}-T`.slice(0, 40),
-        accountId: cashAccState.id,
-        accountName: cashAccState.name.slice(0, 80),
-        direction: 'in',
-        amount: cashIn,
-        balanceBefore: bal0,
-        balanceAfter: bal1,
-        sourceModule: 'sale',
-        referenceId: saleId,
-        description: `Penjualan retail Tunai (Gabungan) ${meta.transactionNumber}`.slice(0, 240),
-        createdAt: serverTimestamp(),
-      });
-
-      writer.set(doc(db, 'cash_ledger', generateSafeId('ldg2')), {
-        ...meta,
-        transactionNumber: `${meta.transactionNumber}-Q`.slice(0, 40),
-        accountId: cashAccState.id,
-        accountName: cashAccState.name.slice(0, 80),
-        direction: 'in',
-        amount: qrisNetIn,
-        balanceBefore: bal1,
-        balanceAfter: bal2,
-        sourceModule: 'sale',
-        referenceId: saleId,
-        description: `Penjualan QRIS bersih ${meta.transactionNumber} (Bruto ${formatRupiah(
-          settlement.qrisAmount
-        )}, Pot. QRIS ${formatRupiah(settlement.qrisFeeAmount)})`.slice(0, 240),
-        createdAt: serverTimestamp(),
-      });
-      return;
+    if (cashAccState) {
+      balCursor.set(cashAccState.id, roundMoney(Number(cashAccState.balance) || 0));
+      accStateMap.set(cashAccState.id, cashAccState);
+    }
+    if (qrisAccState && !balCursor.has(qrisAccState.id)) {
+      balCursor.set(qrisAccState.id, roundMoney(Number(qrisAccState.balance) || 0));
+      accStateMap.set(qrisAccState.id, qrisAccState);
     }
 
-    if (cashAccState && cashIn > 0) {
-      const balBefore = roundMoney(Number(cashAccState.balance) || 0);
-      const balAfter = roundMoney(balBefore + cashIn);
-      writer.update(doc(db, 'accounts', cashAccState.id), {
-        balance: balAfter,
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
-      });
-      writer.set(doc(db, 'cash_ledger', generateSafeId('ldg1')), {
-        ...meta,
-        transactionNumber:
-          qrisNetIn > 0 ? `${meta.transactionNumber}-T`.slice(0, 40) : meta.transactionNumber,
-        accountId: cashAccState.id,
-        accountName: cashAccState.name.slice(0, 80),
+    const pushDeposit = (params: {
+      acc: Account | null;
+      amount: number;
+      sourceModule: 'sale' | 'receivable';
+      referenceId: string;
+      transactionNumber: string;
+      description: string;
+      txMeta: typeof meta;
+    }) => {
+      if (!params.acc || params.amount <= 0) return;
+      const balBefore = balCursor.get(params.acc.id) ?? roundMoney(Number(params.acc.balance) || 0);
+      const balAfter = roundMoney(balBefore + params.amount);
+      balCursor.set(params.acc.id, balAfter);
+
+      writer.set(doc(db, 'cash_ledger', generateSafeId('ldg')), {
+        ...params.txMeta,
+        transactionNumber: params.transactionNumber.slice(0, 40),
+        accountId: params.acc.id,
+        accountName: params.acc.name.slice(0, 80),
         direction: 'in',
-        amount: cashIn,
+        amount: params.amount,
         balanceBefore: balBefore,
         balanceAfter: balAfter,
+        sourceModule: params.sourceModule,
+        referenceId: params.referenceId,
+        description: params.description.slice(0, 240),
+        createdAt: serverTimestamp(),
+      });
+    };
+
+    // 1. Setoran dari penjualan retail
+    const hasSplitSaleDeposit = s.cashDepositAmount > 0 && s.qrisNetDepositAmount > 0;
+    if (s.cashDepositAmount > 0) {
+      pushDeposit({
+        acc: cashAccState,
+        amount: s.cashDepositAmount,
         sourceModule: 'sale',
         referenceId: saleId,
+        transactionNumber: hasSplitSaleDeposit
+          ? `${meta.transactionNumber}-T`
+          : meta.transactionNumber,
         description: isDebtSale
-          ? `DP Kasbon ${effectiveCustomerName} (${meta.transactionNumber})`.slice(0, 240)
+          ? `DP Kasbon ${effectiveCustomerName} (${meta.transactionNumber})`
           : input.paymentMethod === 'mixed'
-            ? `Penjualan Tunai (Gabungan) ${meta.transactionNumber}`.slice(0, 240)
-            : `Penjualan retail ${meta.transactionNumber}`.slice(0, 240),
+            ? `Penjualan Tunai (Gabungan) ${meta.transactionNumber}`
+            : `Penjualan retail ${meta.transactionNumber}`,
+        txMeta: meta,
+      });
+    }
+
+    if (s.qrisNetDepositAmount > 0) {
+      pushDeposit({
+        acc: qrisAccState,
+        amount: s.qrisNetDepositAmount,
+        sourceModule: 'sale',
+        referenceId: saleId,
+        transactionNumber: hasSplitSaleDeposit
+          ? `${meta.transactionNumber}-Q`
+          : meta.transactionNumber,
+        description: `Penjualan QRIS bersih ${meta.transactionNumber} (Bruto ${formatRupiah(
+          s.qrisAmount
+        )}, Pot. QRIS ${formatRupiah(s.qrisFeeAmount)})`,
+        txMeta: meta,
+      });
+    }
+
+    // 2. Pelanggan baru otomatis / update piutang & catatan receivables
+    if (willAutoCreateCustomer && resolvedCustomerId) {
+      writer.set(doc(db, 'customers', resolvedCustomerId), {
+        name: effectiveCustomerName,
+        ...(cleanNewCustomerPhone ? { phone: cleanNewCustomerPhone } : {}),
+        totalDebt: isDebtSale ? s.debtAmount : 0,
+        createdByUid: user.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else if (input.customer) {
+      const debtChanged =
+        (isDebtSale && s.debtAmount > 0) || combined.receivablePaidAmount > 0;
+      if (debtChanged) {
+        writer.update(doc(db, 'customers', input.customer.id), {
+          totalDebt: combined.customerDebtAfter,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+
+    if (isDebtSale && resolvedCustomerId && s.debtAmount > 0) {
+      const recId = generateSafeId('rec');
+      const recMeta = createTransactionMetadata('KBN', user);
+      writer.set(doc(db, 'receivables', recId), {
+        ...recMeta,
+        customerId: resolvedCustomerId,
+        customerName: effectiveCustomerName,
+        type: 'debt',
+        amount: s.debtAmount,
+        balanceAfter: combined.customerDebtAfter,
+        saleId,
+        ...(cashAccState && s.cashDepositAmount > 0 ? { accountId: cashAccState.id } : {}),
+        notes: (
+          s.paidAmount > 0
+            ? `Kasbon Kasir ${meta.transactionNumber} (Total ${formatRupiah(
+                totalAmount
+              )}, DP ${formatRupiah(s.paidAmount)})`
+            : `Kasbon Kasir ${meta.transactionNumber}`
+        ).slice(0, 240),
         createdAt: serverTimestamp(),
       });
     }
 
-    if (qrisAccState && qrisNetIn > 0) {
-      const balBefore = roundMoney(Number(qrisAccState.balance) || 0);
-      const balAfter = roundMoney(balBefore + qrisNetIn);
-      writer.update(doc(db, 'accounts', qrisAccState.id), {
-        balance: balAfter,
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
+    if (!isDebtSale && input.customer && combined.receivablePaidAmount > 0) {
+      let runningRecBalance = combined.customerDebtBefore;
+      const recPayEntries: { acc: Account | null; amount: number; suffix: string; label: string }[] =
+        [];
+      if (combined.receivableCashIn > 0) {
+        recPayEntries.push({
+          acc: cashAccState,
+          amount: combined.receivableCashIn,
+          suffix: combined.receivableQrisIn > 0 ? '-T' : '',
+          label: input.paymentMethod === 'transfer' ? 'Transfer' : 'Tunai',
+        });
+      }
+      if (combined.receivableQrisIn > 0) {
+        recPayEntries.push({
+          acc: qrisAccState,
+          amount: combined.receivableQrisIn,
+          suffix: combined.receivableCashIn > 0 ? '-Q' : '',
+          label: 'QRIS',
+        });
+      }
+
+      recPayEntries.forEach((entry) => {
+        if (!entry.acc || entry.amount <= 0) return;
+        runningRecBalance = roundMoney(Math.max(0, runningRecBalance - entry.amount));
+        const payRecId = generateSafeId('recp');
+        const payMeta = createTransactionMetadata('BYP', user);
+        const recTrxNum = `${payMeta.transactionNumber}${entry.suffix}`.slice(0, 40);
+
+        writer.set(doc(db, 'receivables', payRecId), {
+          ...payMeta,
+          transactionNumber: recTrxNum,
+          customerId: input.customer!.id,
+          customerName: effectiveCustomerName,
+          type: 'payment',
+          amount: entry.amount,
+          balanceAfter: runningRecBalance,
+          saleId,
+          accountId: entry.acc.id,
+          notes: `Bayar piutang di Kasir (${entry.label}) · ${meta.transactionNumber}`.slice(0, 240),
+          createdAt: serverTimestamp(),
+        });
+
+        pushDeposit({
+          acc: entry.acc,
+          amount: entry.amount,
+          sourceModule: 'receivable',
+          referenceId: payRecId,
+          transactionNumber: `${payMeta.transactionNumber}${entry.suffix}`,
+          description: `Bayar piutang ${effectiveCustomerName} di Kasir (${meta.transactionNumber})`,
+          txMeta: payMeta,
+        });
       });
-      writer.set(doc(db, 'cash_ledger', generateSafeId('ldg2')), {
-        ...meta,
-        transactionNumber:
-          cashIn > 0 ? `${meta.transactionNumber}-Q`.slice(0, 40) : meta.transactionNumber,
-        accountId: qrisAccState.id,
-        accountName: qrisAccState.name.slice(0, 80),
-        direction: 'in',
-        amount: qrisNetIn,
-        balanceBefore: balBefore,
-        balanceAfter: balAfter,
-        sourceModule: 'sale',
-        referenceId: saleId,
-        description: `Penjualan QRIS bersih ${meta.transactionNumber} (Bruto ${formatRupiah(
-          settlement.qrisAmount
-        )}, Pot. QRIS ${formatRupiah(settlement.qrisFeeAmount)})`.slice(0, 240),
-        createdAt: serverTimestamp(),
-      });
+    }
+
+    // 3. Commit satu kali update saldo akhir per akun yang terlibat
+    for (const [accId, finalBalance] of balCursor.entries()) {
+      const originalAcc = accStateMap.get(accId);
+      const originalBal = originalAcc ? roundMoney(Number(originalAcc.balance) || 0) : finalBalance;
+      if (finalBalance !== originalBal) {
+        writer.update(doc(db, 'accounts', accId), {
+          balance: finalBalance,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
   };
 
+  let finalCombined = initialCombined;
+
   const executeOfflineBatch = async () => {
     const batch = writeBatch(db);
-    batch.set(doc(db, 'sales', saleId), buildSaleDocPayload(usedExpiredInSale));
+    batch.set(doc(db, 'sales', saleId), buildSaleDocPayload(usedExpiredInSale, initialCombined));
 
+    const rawProdStockMap = new Map<string, number>();
     const runningStockMap = new Map<string, number>();
     for (const { product } of baseDemandByProduct.values()) {
+      const rawStock = Math.max(0, Number(product.stock) || 0);
+      rawProdStockMap.set(product.id, rawStock);
       runningStockMap.set(
         product.id,
-        snapStockToProductPrecision(Number(product.stock) || 0, product)
+        snapStockToProductPrecision(rawStock, product)
       );
     }
 
@@ -1666,53 +1855,38 @@ export async function recordRetailSale(
     });
 
     for (const [productId, finalStock] of runningStockMap.entries()) {
+      const rawStock = rawProdStockMap.get(productId);
+      const safeFinalStock =
+        rawStock !== undefined ? Math.min(rawStock, Math.max(0, finalStock)) : Math.max(0, finalStock);
       batch.update(doc(db, 'products', productId), {
-        stock: finalStock,
+        stock: safeFinalStock,
         updatedAt: serverTimestamp(),
       });
     }
 
+    const rawBatchRemMap = new Map<string, number>();
+    allBatches.forEach((b) => {
+      rawBatchRemMap.set(b.id, Math.max(0, Number(b.remainingBaseQty) || 0));
+    });
+
     for (const plan of initialFefoPlans.values()) {
       for (const alloc of plan.allocations) {
+        if (alloc.deductQty <= 0) continue;
+        const rawBatchRem = rawBatchRemMap.get(alloc.batchId);
+        const safeRemaining =
+          rawBatchRem !== undefined
+            ? Math.min(rawBatchRem, Math.max(0, alloc.remainingAfter))
+            : Math.max(0, alloc.remainingAfter);
         batch.update(doc(db, 'stock_batches', alloc.batchId), {
-          remainingBaseQty: alloc.remainingAfter,
+          remainingBaseQty: safeRemaining,
           status: alloc.nextStatus,
           updatedAt: serverTimestamp(),
         });
       }
     }
 
-    applyAccountDeposits(batch, cashAccount, qrisTargetAccount);
-
-    if (isDebtSale && input.customer && settlement.debtAmount > 0) {
-      const prevDebt = roundMoney(Math.max(0, Number(input.customer.totalDebt) || 0));
-      const newDebt = roundMoney(prevDebt + settlement.debtAmount);
-      batch.update(doc(db, 'customers', input.customer.id), {
-        totalDebt: newDebt,
-        updatedAt: serverTimestamp(),
-      });
-
-      const recId = generateSafeId('rec');
-      const recMeta = createTransactionMetadata('KBN', user);
-      batch.set(doc(db, 'receivables', recId), {
-        ...recMeta,
-        customerId: input.customer.id,
-        customerName: input.customer.name.slice(0, 100),
-        type: 'debt',
-        amount: settlement.debtAmount,
-        balanceAfter: newDebt,
-        saleId,
-        ...(cashAccount && settlement.cashDepositAmount > 0 ? { accountId: cashAccount.id } : {}),
-        notes: (
-          settlement.paidAmount > 0
-            ? `Kasbon Kasir ${meta.transactionNumber} (Total ${formatRupiah(
-                totalAmount
-              )}, DP ${formatRupiah(settlement.paidAmount)})`
-            : `Kasbon Kasir ${meta.transactionNumber}`
-        ).slice(0, 240),
-        createdAt: serverTimestamp(),
-      });
-    }
+    applyDepositsAndReceivables(batch, cashAccount, qrisTargetAccount, initialCombined);
+    finalCombined = initialCombined;
 
     await batch.commit();
   };
@@ -1746,8 +1920,8 @@ export async function recordRetailSale(
           );
 
           const uniqueAccIds = new Set<string>();
-          if (cashAccount && settlement.cashDepositAmount > 0) uniqueAccIds.add(cashAccount.id);
-          if (qrisTargetAccount && settlement.qrisNetDepositAmount > 0) {
+          if (cashAccount && totalCashNeeded > 0) uniqueAccIds.add(cashAccount.id);
+          if (qrisTargetAccount && totalQrisNeeded > 0) {
             uniqueAccIds.add(qrisTargetAccount.id);
           }
           const accIdList = Array.from(uniqueAccIds);
@@ -1755,10 +1929,9 @@ export async function recordRetailSale(
             accIdList.map((id) => tx.get(doc(db, 'accounts', id)))
           );
 
-          const custSnap =
-            isDebtSale && input.customer
-              ? await tx.get(doc(db, 'customers', input.customer.id))
-              : null;
+          const custSnap = input.customer
+            ? await tx.get(doc(db, 'customers', input.customer.id))
+            : null;
 
           // Validate live stock & live batch expiry
           const liveBatches: StockBatch[] = [];
@@ -1768,6 +1941,11 @@ export async function recordRetailSale(
             }
           });
 
+          const rawProdStockMap = new Map<string, number>();
+          const rawBatchRemMap = new Map<string, number>();
+          liveBatches.forEach((b) => {
+            rawBatchRemMap.set(b.id, Math.max(0, Number(b.remainingBaseQty) || 0));
+          });
           const runningStockMap = new Map<string, number>();
           const liveFefoPlans: ReturnType<typeof planFefoBatchDeduction>[] = [];
           let liveUsedExpired = false;
@@ -1778,8 +1956,10 @@ export async function recordRetailSale(
               throw new Error(`Produk "${product.name}" tidak ditemukan atau telah dihapus oleh Admin.`);
             }
             const liveProdData = pSnap.data() as Product;
+            const rawLiveStock = Math.max(0, Number(liveProdData.stock) || 0);
+            rawProdStockMap.set(product.id, rawLiveStock);
             const liveStock = snapStockToProductPrecision(
-              Number(liveProdData.stock) || 0,
+              rawLiveStock,
               liveProdData
             );
             if (!isStockSufficientWithTolerance(liveStock, totalBaseQty, liveProdData)) {
@@ -1817,8 +1997,25 @@ export async function recordRetailSale(
             liveAccMap.set(id, { id, ...(snap.data() as Omit<Account, 'id'>) });
           });
 
+          const livePrevDebt =
+            custSnap && custSnap.exists()
+              ? roundMoney(Math.max(0, Number((custSnap.data() as Customer).totalDebt) || 0))
+              : initialPrevDebt;
+
+          const liveCombined = calculateCombinedPosSettlement({
+            saleTotalAmount: totalAmount,
+            paymentMethod: input.paymentMethod,
+            paidAmount: input.paidAmount,
+            cashPart: input.cashPart,
+            qrisPart: input.qrisPart,
+            qrisFeePercent: input.qrisFeePercent ?? DEFAULT_QRIS_FEE_PERCENT,
+            customerPrevDebt: livePrevDebt,
+            receivablePayAmount: requestedReceivablePay,
+          });
+          finalCombined = liveCombined;
+
           // Execute atomic writes
-          tx.set(doc(db, 'sales', saleId), buildSaleDocPayload(liveUsedExpired));
+          tx.set(doc(db, 'sales', saleId), buildSaleDocPayload(liveUsedExpired, liveCombined));
 
           resolvedLines.forEach(({ item, resolved }, idx) => {
             const itemId = generateSafeId(`itm${idx}`);
@@ -1876,62 +2073,39 @@ export async function recordRetailSale(
           });
 
           for (const [productId, finalStock] of runningStockMap.entries()) {
+            const rawStock = rawProdStockMap.get(productId);
+            const safeFinalStock =
+              rawStock !== undefined
+                ? Math.min(rawStock, Math.max(0, finalStock))
+                : Math.max(0, finalStock);
             tx.update(doc(db, 'products', productId), {
-              stock: finalStock,
+              stock: safeFinalStock,
               updatedAt: serverTimestamp(),
             });
           }
 
           for (const plan of liveFefoPlans) {
             for (const alloc of plan.allocations) {
+              if (alloc.deductQty <= 0) continue;
+              const rawBatchRem = rawBatchRemMap.get(alloc.batchId);
+              const safeRemaining =
+                rawBatchRem !== undefined
+                  ? Math.min(rawBatchRem, Math.max(0, alloc.remainingAfter))
+                  : Math.max(0, alloc.remainingAfter);
               tx.update(doc(db, 'stock_batches', alloc.batchId), {
-                remainingBaseQty: alloc.remainingAfter,
+                remainingBaseQty: safeRemaining,
                 status: alloc.nextStatus,
                 updatedAt: serverTimestamp(),
               });
             }
           }
 
-          applyAccountDeposits(
+          applyDepositsAndReceivables(
             tx,
             cashAccount ? liveAccMap.get(cashAccount.id) || null : null,
-            qrisTargetAccount ? liveAccMap.get(qrisTargetAccount.id) || null : null
+            qrisTargetAccount ? liveAccMap.get(qrisTargetAccount.id) || null : null,
+            liveCombined
           );
-
-          if (isDebtSale && input.customer && settlement.debtAmount > 0) {
-            const livePrevDebt =
-              custSnap && custSnap.exists()
-                ? roundMoney(Math.max(0, Number((custSnap.data() as Customer).totalDebt) || 0))
-                : roundMoney(Math.max(0, Number(input.customer.totalDebt) || 0));
-            const newDebt = roundMoney(livePrevDebt + settlement.debtAmount);
-            tx.update(doc(db, 'customers', input.customer.id), {
-              totalDebt: newDebt,
-              updatedAt: serverTimestamp(),
-            });
-
-            const recId = generateSafeId('rec');
-            const recMeta = createTransactionMetadata('KBN', user);
-            tx.set(doc(db, 'receivables', recId), {
-              ...recMeta,
-              customerId: input.customer.id,
-              customerName: input.customer.name.slice(0, 100),
-              type: 'debt',
-              amount: settlement.debtAmount,
-              balanceAfter: newDebt,
-              saleId,
-              ...(cashAccount && settlement.cashDepositAmount > 0
-                ? { accountId: cashAccount.id }
-                : {}),
-              notes: (
-                settlement.paidAmount > 0
-                  ? `Kasbon Kasir ${meta.transactionNumber} (Total ${formatRupiah(
-                      totalAmount
-                    )}, DP ${formatRupiah(settlement.paidAmount)})`
-                  : `Kasbon Kasir ${meta.transactionNumber}`
-              ).slice(0, 240),
-              createdAt: serverTimestamp(),
-            });
-          }
         });
       } catch (err) {
         if (isOfflineTransactionError(err)) {
@@ -1942,15 +2116,21 @@ export async function recordRetailSale(
       }
     }
 
+    const sOut = finalCombined.saleSettlement;
+    const hasDebtMeta =
+      finalCombined.receivablePaidAmount > 0 ||
+      finalCombined.customerDebtBefore > 0 ||
+      sOut.debtAmount > 0;
+
     return {
       saleId,
       transactionNumber: meta.transactionNumber,
       transactionDate: meta.transactionDate,
       transactionTime: meta.transactionTime,
       recordedByName: meta.recordedByName,
-      ...(input.customer ? { customerId: input.customer.id } : {}),
+      ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
       ...(effectiveCustomerName ? { customerName: effectiveCustomerName } : {}),
-      ...(input.customer?.phone ? { customerPhone: input.customer.phone } : {}),
+      ...(effectiveCustomerPhone ? { customerPhone: effectiveCustomerPhone } : {}),
       items: resolvedLines.map(({ item, resolved }) => ({
         name: item.product.name,
         unitName: resolved.option.unitName,
@@ -1968,15 +2148,22 @@ export async function recordRetailSale(
       totalAmount,
       totalCost,
       totalProfit,
-      paidAmount: settlement.paidAmount,
-      changeAmount: settlement.changeAmount,
-      debtAmount: settlement.debtAmount,
+      paidAmount: finalCombined.grandPaidAmount,
+      changeAmount: finalCombined.grandChangeAmount,
+      debtAmount: sOut.debtAmount,
+      ...(hasDebtMeta
+        ? {
+            receivablePaidAmount: finalCombined.receivablePaidAmount,
+            customerDebtBefore: finalCombined.customerDebtBefore,
+            customerDebtAfter: finalCombined.customerDebtAfter,
+          }
+        : {}),
       paymentMethod: input.paymentMethod,
-      cashPaidPart: settlement.cashPaidPart,
-      qrisAmount: settlement.qrisAmount,
-      qrisFeeRate: settlement.qrisFeeRate,
-      qrisFeeAmount: settlement.qrisFeeAmount,
-      netReceivedAmount: settlement.netReceivedAmount,
+      cashPaidPart: sOut.cashPaidPart,
+      qrisAmount: sOut.qrisAmount,
+      qrisFeeRate: sOut.qrisFeeRate,
+      qrisFeeAmount: sOut.qrisFeeAmount,
+      netReceivedAmount: sOut.netReceivedAmount,
     };
   } catch (error) {
     if (error instanceof Error && !error.message.includes('Missing or insufficient permissions')) {
@@ -2073,6 +2260,15 @@ export async function fetchSaleReceiptFromSale(
       paidAmount: Number(sale.paidAmount) || 0,
       changeAmount: Number(sale.changeAmount) || 0,
       debtAmount: Number(sale.debtAmount) || 0,
+      ...(sale.receivablePaidAmount !== undefined
+        ? { receivablePaidAmount: Number(sale.receivablePaidAmount) || 0 }
+        : {}),
+      ...(sale.customerDebtBefore !== undefined
+        ? { customerDebtBefore: Number(sale.customerDebtBefore) || 0 }
+        : {}),
+      ...(sale.customerDebtAfter !== undefined
+        ? { customerDebtAfter: Number(sale.customerDebtAfter) || 0 }
+        : {}),
       paymentMethod: sale.paymentMethod,
       cashPaidPart: Number(sale.cashPaidPart) || 0,
       qrisAmount: Number(sale.qrisAmount) || 0,

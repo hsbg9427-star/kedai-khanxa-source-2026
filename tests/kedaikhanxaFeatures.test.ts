@@ -11,11 +11,14 @@ import {
 import {
   addCalendarMonths,
   calculateDaysRemaining,
+  collectExpiryAlerts,
   computeEstimatedExpiryDate,
   evaluateBatchExpiry,
   getEffectiveExpiryDate,
   getExpiryStatus,
   planFefoBatchDeduction,
+  resolveDefaultProductExpiryInput,
+  resolveProductExpiryDates,
   summarizeProductBatches,
 } from '../src/utils/expiryUtils';
 
@@ -385,3 +388,129 @@ test('Skenario 11: Sinkronisasi dua perangkat (offline & online) menghasilkan lo
   assert.equal(serverIdentityLocks.size, 1);
   assert.equal(serverBarcodeLocks.size, 1);
 });
+
+test('Skenario 12: Input produk (termasuk stok 0) otomatis menetapkan expired +6 bulan dari tanggal input dan pemberitahuan 1 bulan sebelumnya', () => {
+  // 1. Produk baru tanpa override ED aktual -> otomatis +6 bulan kalender
+  const autoRes = resolveDefaultProductExpiryInput('2026-02-15');
+  assert.equal(autoRes.inputDate, '2026-02-15');
+  assert.equal(autoRes.estimatedExpiryDate, '2026-08-15');
+  assert.equal(autoRes.actualExpiryDate, undefined);
+  assert.equal(autoRes.expiryDate, '2026-08-15');
+
+  // 2. Produk dengan ED kemasan aktual tetap memprioritaskan tanggal aktual
+  const overrideRes = resolveDefaultProductExpiryInput('2026-02-15', '2026-10-01');
+  assert.equal(overrideRes.expiryDate, '2026-10-01');
+
+  // 3. Produk stok 0 dengan inputDate & expiryDate tetap memicu notifikasi 1 bulan (<= 30 hari) sebelum expired
+  const zeroStockNearExpProduct = makeProduct({
+    id: 'prd_zero_near',
+    name: 'Saus Sambal Sachet',
+    stock: 0,
+    inputDate: '2026-01-15',
+    expiryDate: '2026-07-15',
+  });
+  const resolved = resolveProductExpiryDates(zeroStockNearExpProduct);
+  assert.equal(resolved.hasExplicitDates, true);
+  assert.equal(resolved.effectiveExpiryDate, '2026-07-15');
+
+  // 31 hari sebelum 2026-07-15 (2026-06-14) -> belum muncul pemberitahuan
+  const alertsBeforeThreshold = collectExpiryAlerts([zeroStockNearExpProduct], [], '2026-06-14');
+  assert.equal(alertsBeforeThreshold.length, 0);
+
+  // Tepat 30 hari / ~1 bulan sebelum 2026-07-15 (2026-06-15) -> pemberitahuan muncul
+  const alertsAt1Month = collectExpiryAlerts([zeroStockNearExpProduct], [], '2026-06-15');
+  assert.equal(alertsAt1Month.length, 1);
+  assert.equal(alertsAt1Month[0].source, 'product');
+  assert.equal(alertsAt1Month[0].expiryStatus, 'MENDEKATI EXPIRED');
+  assert.equal(alertsAt1Month[0].daysRemaining, 30);
+
+  // 4. Produk yang sudah memiliki batch aktif tidak diduplikasi oleh fallback product-level, dan EXPIRED diurutkan paling atas
+  const batchedProduct = makeProduct({
+    id: 'prd_batched_exp',
+    name: 'Roti Coklat',
+    stock: 5,
+    inputDate: '2025-11-01',
+    expiryDate: '2026-05-01',
+  });
+  const expiredBatch = makeBatch({
+    id: 'bat_roti_exp',
+    productId: 'prd_batched_exp',
+    productName: 'Roti Coklat',
+    startDate: '2025-11-01',
+    estimatedExpiryDate: '2026-05-01',
+    effectiveExpiryDate: '2026-05-01',
+    remainingBaseQty: 5,
+    status: 'active',
+  });
+
+  const combinedAlerts = collectExpiryAlerts(
+    [zeroStockNearExpProduct, batchedProduct],
+    [expiredBatch],
+    '2026-06-15'
+  );
+  assert.equal(combinedAlerts.length, 2);
+  assert.equal(combinedAlerts[0].productId, 'prd_batched_exp');
+  assert.equal(combinedAlerts[0].source, 'batch');
+  assert.equal(combinedAlerts[0].expiryStatus, 'EXPIRED');
+  assert.equal(combinedAlerts[1].productId, 'prd_zero_near');
+  assert.equal(combinedAlerts[1].source, 'product');
+  assert.equal(combinedAlerts[1].expiryStatus, 'MENDEKATI EXPIRED');
+});
+
+test('Skenario 13: Pengurangan stok sub-satuan (1 Bks = 12 BATANG) dan format pesan error Firestore terbaca bersih tanpa JSON mentah', async () => {
+  const { computeBaseQuantityFromUnit, snapStockToProductPrecision } = await import(
+    '../src/utils/unitConversion'
+  );
+  const { getReadableFirestoreError } = await import('../src/utils/firestoreError');
+
+  const rokokProduct = makeProduct({
+    id: 'prd_reffil_12',
+    name: 'REFFIL 12',
+    unit: 'Bks',
+    stock: 4.916667, // 4 Bks 11 BATANG
+    sellUnits: [
+      {
+        unitName: 'BATANG',
+        conversion: 0.083333,
+        conversionMode: 'divide',
+        perBaseQty: 12,
+        sellPrice: 2000,
+        canBuy: false,
+        canSell: true,
+      },
+    ],
+  });
+
+  const baseQty1Batang = computeBaseQuantityFromUnit(1, {
+    conversion: 0.083333,
+    conversionMode: 'divide',
+    perBaseQty: 12,
+  });
+  assert.ok(baseQty1Batang > 0 && baseQty1Batang < 0.09);
+
+  const rawLiveStock = Number(rokokProduct.stock);
+  const liveSnapped = snapStockToProductPrecision(rawLiveStock, rokokProduct);
+  const computedAfter = snapStockToProductPrecision(
+    Math.max(0, liveSnapped - baseQty1Batang),
+    rokokProduct
+  );
+  const clampedFinalStock = Math.min(rawLiveStock, Math.max(0, computedAfter));
+  assert.ok(clampedFinalStock <= rawLiveStock);
+  assert.equal(Math.round(clampedFinalStock * 12), 58); // 4 Bks 10 BATANG
+
+  const rawPermJson = JSON.stringify({
+    error: 'Missing or insufficient permissions.',
+    operationType: 'write',
+    path: 'sales/sale_123',
+  });
+  const readablePerm = getReadableFirestoreError(new Error(rawPermJson));
+  assert.equal(readablePerm.startsWith('{'), false);
+  assert.match(readablePerm, /Akses ditolak oleh aturan keamanan Firestore/);
+
+  const domainErr = getReadableFirestoreError(
+    new Error('Stok "REFFIL 12" tidak mencukupi.')
+  );
+  assert.equal(domainErr, 'Stok "REFFIL 12" tidak mencukupi.');
+});
+
+

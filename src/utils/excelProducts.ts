@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { Category, Product, ProductSellUnit } from '../types/database';
-import { isValidYmd } from './expiryUtils';
+import { isValidYmd, resolveProductExpiryDates } from './expiryUtils';
 import { getTodayDateString } from './formatters';
 import { normalizeDisplayText } from './productIdentity';
 
@@ -79,31 +79,36 @@ function parseSellUnitsText(raw: string): ProductSellUnit[] {
 }
 
 export function exportProductsToExcel(products: Product[], storeName: string): void {
-  const rows = products.map((p, idx) => ({
-    No: idx + 1,
-    'Kode Barang': p.sku,
-    Barcode: p.barcode || '',
-    'Nama Barang': p.name,
-    Merek: p.brand || '',
-    'Varian / Ukuran': p.variant || '',
-    Kategori: p.categoryName,
-    'Satuan Dasar': p.unit,
-    'Harga Beli (HPP)': p.costPrice,
-    'Harga Ecer': p.sellPrice,
-    'Harga Grosir': p.wholesalePrice ?? '',
-    'Min Beli Grosir': p.wholesaleMinQty ?? '',
-    'Satuan Tambahan': formatSellUnitsText(p.sellUnits),
-    Stok: p.stock,
-    'Stok Minimum': p.minStock,
-    Status:
-      p.stock <= 0
-        ? 'Habis'
-        : p.stock <= p.minStock
-          ? 'Stok Menipis'
-          : p.isActive
-            ? 'Aktif'
-            : 'Nonaktif',
-  }));
+  const rows = products.map((p, idx) => {
+    const exp = resolveProductExpiryDates(p);
+    return {
+      No: idx + 1,
+      'Kode Barang': p.sku,
+      Barcode: p.barcode || '',
+      'Nama Barang': p.name,
+      Merek: p.brand || '',
+      'Varian / Ukuran': p.variant || '',
+      Kategori: p.categoryName,
+      'Satuan Dasar': p.unit,
+      'Harga Beli (HPP)': p.costPrice,
+      'Harga Ecer': p.sellPrice,
+      'Harga Grosir': p.wholesalePrice ?? '',
+      'Min Beli Grosir': p.wholesaleMinQty ?? '',
+      'Satuan Tambahan': formatSellUnitsText(p.sellUnits),
+      Stok: p.stock,
+      'Stok Minimum': p.minStock,
+      'Tanggal Input': exp.hasExplicitDates ? exp.inputDate : '',
+      'Tanggal Expired': exp.hasExplicitDates ? exp.effectiveExpiryDate : '',
+      Status:
+        p.stock <= 0
+          ? 'Habis'
+          : p.stock <= p.minStock
+            ? 'Stok Menipis'
+            : p.isActive
+              ? 'Aktif'
+              : 'Nonaktif',
+    };
+  });
 
   const worksheet = XLSX.utils.json_to_sheet(rows);
   worksheet['!cols'] = [
@@ -122,6 +127,8 @@ export function exportProductsToExcel(products: Product[], storeName: string): v
     { wch: 30 },
     { wch: 10 },
     { wch: 14 },
+    { wch: 14 },
+    { wch: 15 },
     { wch: 14 },
   ];
 

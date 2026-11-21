@@ -7,6 +7,7 @@ import type {
   Sale,
 } from '../types/database';
 import { roundMoney } from './unitConversion';
+import { calculateMiniAtmBreakdown, calculatePpobBreakdown } from './serviceTransactions';
 
 export interface ComputeCashierClosingInput {
   sales: Sale[];
@@ -182,33 +183,66 @@ export function computeCashierClosingBreakdown(
     if (!isInDateRange(tx.transactionDate, input.periodStartDate, input.periodEndDate)) continue;
 
     miniAtmTxCount += 1;
-    const principal = roundMoney(Math.max(0, Number(tx.principalAmount) || 0));
-    const adminFee = roundMoney(Math.max(0, Number(tx.adminFee) || 0));
-    const bankFee = roundMoney(Math.max(0, Number(tx.bankFee) || 0));
-    const internalExtra = roundMoney(Math.max(0, Number(tx.internalExtraFee) || 0));
     const cashDrawerUsed = isCashAccount(tx.cashAccountId, true);
-
-    if (tx.serviceType === 'tarik_tunai') {
-      // Customer bayar via QRIS/kartu ke rekening bank warung (non-tunai); warung serahkan uang tunai ke customer.
-      // Cash delta laci = -(principal - internalExtra) + adminFee
-      const cashDelta = roundMoney(-(principal - internalExtra) + adminFee);
-      if (cashDrawerUsed) {
-        if (cashDelta >= 0) {
-          miniAtmCashIn = roundMoney(miniAtmCashIn + cashDelta);
-        } else {
-          miniAtmCashOut = roundMoney(miniAtmCashOut + Math.abs(cashDelta));
+    let breakdown;
+    try {
+      breakdown = calculateMiniAtmBreakdown({
+        serviceType: tx.serviceType,
+        paymentChannel: tx.paymentChannel || 'bank_transfer',
+        paymentStatus: tx.paymentStatus || 'paid',
+        paidAmount: tx.paidAmount,
+        allowQrisTarikTunai: true,
+        qrisVerified: true,
+        qrisMdrRate: tx.qrisMdrRate ?? 0,
+        qrisMdrAmountOverride: tx.qrisMdrAmount ?? 0,
+        qrisInternalExtraFeeOverride: tx.internalExtraFee ?? 0,
+        principalAmount: tx.principalAmount,
+        adminFee: tx.adminFee,
+        bankFee: tx.bankFee,
+      });
+    } catch {
+      const principal = roundMoney(Math.max(0, Number(tx.principalAmount) || 0));
+      const adminFee = roundMoney(Math.max(0, Number(tx.adminFee) || 0));
+      const bankFee = roundMoney(Math.max(0, Number(tx.bankFee) || 0));
+      const paidNow =
+        tx.paymentStatus === 'debt'
+          ? roundMoney(Math.max(0, Number(tx.paidAmount) || 0))
+          : roundMoney(principal + adminFee);
+      if (tx.serviceType === 'tarik_tunai') {
+        const cashDelta =
+          tx.paymentStatus === 'debt'
+            ? roundMoney(-principal + paidNow)
+            : roundMoney(-(principal - (Number(tx.internalExtraFee) || 0)) + adminFee);
+        if (cashDrawerUsed) {
+          if (cashDelta >= 0) miniAtmCashIn = roundMoney(miniAtmCashIn + cashDelta);
+          else miniAtmCashOut = roundMoney(miniAtmCashOut + Math.abs(cashDelta));
         }
-      }
-      miniAtmNonCashTotal = roundMoney(miniAtmNonCashTotal + principal);
-    } else {
-      // Transfer Bank / Setor Tunai: pelanggan serahkan tunai (principal + adminFee) ke laci kas; bank transfer keluar.
-      const cashIn = roundMoney(principal + adminFee);
-      if (cashDrawerUsed) {
-        miniAtmCashIn = roundMoney(miniAtmCashIn + cashIn);
+        if (tx.paymentStatus !== 'debt') {
+          miniAtmNonCashTotal = roundMoney(miniAtmNonCashTotal + principal);
+        }
       } else {
-        miniAtmNonCashTotal = roundMoney(miniAtmNonCashTotal + cashIn);
+        if (cashDrawerUsed) {
+          miniAtmCashIn = roundMoney(miniAtmCashIn + paidNow);
+        } else {
+          miniAtmNonCashTotal = roundMoney(miniAtmNonCashTotal + paidNow);
+        }
+        miniAtmNonCashTotal = roundMoney(miniAtmNonCashTotal + principal + bankFee);
       }
-      miniAtmNonCashTotal = roundMoney(miniAtmNonCashTotal + principal + bankFee);
+      continue;
+    }
+
+    if (cashDrawerUsed) {
+      if (breakdown.cashDelta > 0) {
+        miniAtmCashIn = roundMoney(miniAtmCashIn + breakdown.cashDelta);
+      } else if (breakdown.cashDelta < 0) {
+        miniAtmCashOut = roundMoney(miniAtmCashOut + Math.abs(breakdown.cashDelta));
+      }
+    } else if (breakdown.cashDelta > 0) {
+      miniAtmNonCashTotal = roundMoney(miniAtmNonCashTotal + breakdown.cashDelta);
+    }
+
+    if (breakdown.bankLedgerAmount > 0) {
+      miniAtmNonCashTotal = roundMoney(miniAtmNonCashTotal + Math.abs(breakdown.bankDelta));
     }
   }
 
@@ -223,15 +257,30 @@ export function computeCashierClosingBreakdown(
     if (!isInDateRange(tx.transactionDate, input.periodStartDate, input.periodEndDate)) continue;
 
     ppobTxCount += 1;
-    const customerTotal = roundMoney(
-      Math.max(0, Number(tx.sellPrice) || 0) + Math.max(0, Number(tx.adminFee) || 0)
-    );
+    let cashReceived = 0;
+    try {
+      const b = calculatePpobBreakdown({
+        capitalPrice: tx.capitalPrice,
+        sellPrice: tx.sellPrice,
+        adminFee: tx.adminFee,
+        paymentStatus: tx.paymentStatus || 'paid',
+        paidAmount: tx.paidAmount,
+      });
+      cashReceived = b.cashReceiptDelta;
+    } catch {
+      cashReceived =
+        tx.paymentStatus === 'debt'
+          ? roundMoney(Math.max(0, Number(tx.paidAmount) || 0))
+          : roundMoney(Math.max(0, Number(tx.sellPrice) || 0) + Math.max(0, Number(tx.adminFee) || 0));
+    }
     const capitalPrice = roundMoney(Math.max(0, Number(tx.capitalPrice) || 0));
 
-    if (isCashAccount(tx.cashAccountId, true)) {
-      ppobCashIn = roundMoney(ppobCashIn + customerTotal);
-    } else {
-      ppobNonCashTotal = roundMoney(ppobNonCashTotal + customerTotal);
+    if (cashReceived > 0) {
+      if (isCashAccount(tx.cashAccountId, true)) {
+        ppobCashIn = roundMoney(ppobCashIn + cashReceived);
+      } else {
+        ppobNonCashTotal = roundMoney(ppobNonCashTotal + cashReceived);
+      }
     }
 
     // Jika sumber modal PPOB bukan akun deposit/bank melainkan secara tidak sengaja akun tunai, perhitungkan keluarnya
@@ -247,6 +296,7 @@ export function computeCashierClosingBreakdown(
   for (const r of input.receivables) {
     if (r.recordedByUid !== input.targetCashierUid) continue;
     if (r.type !== 'payment') continue;
+    if (!r.accountId) continue; // Abaikan koreksi pembatalan/void transaksi yang tidak menerima uang kas
     if (!isInDateRange(r.transactionDate, input.periodStartDate, input.periodEndDate)) continue;
 
     receivablePaymentCount += 1;

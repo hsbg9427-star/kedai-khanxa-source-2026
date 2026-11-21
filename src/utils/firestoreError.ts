@@ -63,5 +63,21 @@ export function getReadableFirestoreError(error: unknown): string {
   if (raw.includes('the client is offline')) {
     return 'Perangkat sedang offline. Data akan disimpan lokal dan disinkronkan saat online.';
   }
+  if (raw.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw) as Partial<FirestoreErrorInfo>;
+      if (parsed && typeof parsed.error === 'string') {
+        if (parsed.error.includes('Missing or insufficient permissions')) {
+          return 'Akses ditolak oleh aturan keamanan Firestore. Pastikan peran akun Anda sesuai.';
+        }
+        return 'Terjadi kendala saat memproses data ke server. Silakan coba lagi.';
+      }
+    } catch {
+      // Abaikan kegagalan parse JSON
+    }
+  }
+  if (error instanceof Error && raw.trim() && !raw.includes('FirebaseError:')) {
+    return raw;
+  }
   return 'Terjadi kendala saat memproses data ke server. Silakan coba lagi.';
 }

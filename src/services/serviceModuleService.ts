@@ -16,11 +16,13 @@ import {
 import { db } from '../firebase';
 import type {
   Account,
+  Customer,
   MiniAtmFeeAudit,
   MiniAtmPaymentChannel,
   MiniAtmSetting,
   MiniAtmTransaction,
   PpobTransaction,
+  ServicePaymentStatus,
 } from '../types/database';
 import { handleFirestoreError, OperationType } from '../utils/firestoreError';
 import { createTransactionMetadata, formatRupiah, generateSafeId } from '../utils/formatters';
@@ -189,6 +191,8 @@ export function subscribeMiniAtmTransactions(
 export interface RecordMiniAtmInput {
   serviceType: MiniAtmServiceType;
   paymentChannel?: MiniAtmPaymentChannel;
+  paymentStatus?: ServicePaymentStatus;
+  paidAmount?: number;
   allowQrisTarikTunai?: boolean;
   qrisVerified?: boolean;
   transferVerified?: boolean;
@@ -197,7 +201,10 @@ export interface RecordMiniAtmInput {
   qrisInternalExtraFee?: number;
   bankName: string;
   targetAccountNumber?: string;
+  customer?: Customer | null;
   customerName?: string;
+  autoCreateCustomer?: boolean;
+  newCustomerPhone?: string;
   externalReferenceNumber?: string;
   transferProofDataUrl?: string;
   principalAmount: number;
@@ -218,6 +225,12 @@ export async function recordMiniAtmTransaction(
   txId: string;
   transactionNumber: string;
   netProfit: number;
+  paymentStatus: ServicePaymentStatus;
+  paidAmount: number;
+  debtAmount: number;
+  customerId?: string;
+  customerName?: string;
+  customerDebtAfter?: number;
 }> {
   if (input.serviceType === 'setor_tunai') {
     throw new Error('Menu Setor Tunai dinonaktifkan. Gunakan layanan Tarik Tunai atau Transfer Bank.');
@@ -228,7 +241,17 @@ export async function recordMiniAtmTransaction(
     throw new Error('Nama bank / tujuan wajib diisi.');
   }
   const cleanTarget = (input.targetAccountNumber || '').trim().slice(0, 40);
-  const cleanCustomer = (input.customerName || '').trim().slice(0, 100);
+  const cleanTypedCustomer = (input.customerName || '').trim().slice(0, 100);
+  const willAutoCreateCustomer = Boolean(
+    input.autoCreateCustomer &&
+      !input.customer &&
+      cleanTypedCustomer &&
+      cleanTypedCustomer.toLowerCase() !== 'umum'
+  );
+  const cleanNewCustomerPhone = (input.newCustomerPhone || '').trim().slice(0, 24);
+  const effectiveCustomerName = (input.customer?.name || cleanTypedCustomer).slice(0, 100);
+  const paymentStatus: ServicePaymentStatus = input.paymentStatus === 'debt' ? 'debt' : 'paid';
+
   const cleanExternalRef = (input.externalReferenceNumber || '').trim().slice(0, 80);
   const cleanProof = (input.transferProofDataUrl || '').trim();
   if (cleanProof.length > 80000) {
@@ -239,7 +262,7 @@ export async function recordMiniAtmTransaction(
     if (!cleanTarget) {
       throw new Error('Nomor rekening tujuan wajib diisi untuk layanan Transfer Bank.');
     }
-    if (!cleanCustomer) {
+    if (!effectiveCustomerName) {
       throw new Error('Nama penerima wajib diisi untuk layanan Transfer Bank.');
     }
     if (!input.transferVerified) {
@@ -247,6 +270,12 @@ export async function recordMiniAtmTransaction(
         'Transfer Bank hanya dapat diselesaikan setelah transfer ke rekening tujuan berhasil diverifikasi.'
       );
     }
+  }
+
+  if (paymentStatus === 'debt' && !input.customer && !willAutoCreateCustomer) {
+    throw new Error(
+      'Pilih atau ketik nama pelanggan terlebih dahulu untuk transaksi Mini ATM berstatus Hutang (Bon).'
+    );
   }
 
   if (!input.cashAccount.isActive) {
@@ -262,6 +291,8 @@ export async function recordMiniAtmTransaction(
   const breakdown = calculateMiniAtmBreakdown({
     serviceType: input.serviceType,
     paymentChannel: input.paymentChannel,
+    paymentStatus,
+    paidAmount: input.paidAmount,
     allowQrisTarikTunai: input.allowQrisTarikTunai,
     qrisVerified: input.qrisVerified,
     qrisMdrRate: input.qrisMdrRate,
@@ -291,6 +322,8 @@ export async function recordMiniAtmTransaction(
   const cashLedgerId = generateSafeId('ldg');
   const bankLedgerId = generateSafeId('ldg');
   const auditId = generateSafeId('aud');
+  const resolvedCustomerId =
+    input.customer?.id || (willAutoCreateCustomer ? generateSafeId('cst') : undefined);
   const meta = createTransactionMetadata('ATM', user);
   const serviceLabel = getMiniAtmServiceLabel(input.serviceType);
   const cleanNotes = (input.notes || '').trim().slice(0, 240);
@@ -301,10 +334,14 @@ export async function recordMiniAtmTransaction(
   const cashLedgerRef = doc(db, 'cash_ledger', cashLedgerId);
   const bankLedgerRef = doc(db, 'cash_ledger', bankLedgerId);
   const auditRef = doc(db, 'mini_atm_fee_audits', auditId);
+  const customerRef = input.customer ? doc(db, 'customers', input.customer.id) : null;
+
+  let finalCustomerDebtAfter: number | undefined;
 
   const applyAccountAndLedgerWrites = (
     cashAccData: Pick<Account, 'name' | 'balance'>,
     bankAccData: Pick<Account, 'name' | 'balance'>,
+    liveCustomerData: Pick<Customer, 'totalDebt'> | null,
     writer: {
       set: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
       update: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
@@ -330,27 +367,81 @@ export async function recordMiniAtmTransaction(
       );
     }
 
-    writer.update(cashAccRef, {
-      balance: cashAfter,
-      updatedByUid: user.uid,
-      updatedAt: serverTimestamp(),
-    });
-    writer.update(bankAccRef, {
-      balance: bankAfter,
-      updatedByUid: user.uid,
-      updatedAt: serverTimestamp(),
-    });
+    if (breakdown.cashDelta !== 0) {
+      writer.update(cashAccRef, {
+        balance: cashAfter,
+        updatedByUid: user.uid,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    if (breakdown.bankDelta !== 0) {
+      writer.update(bankAccRef, {
+        balance: bankAfter,
+        updatedByUid: user.uid,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    if (willAutoCreateCustomer && resolvedCustomerId) {
+      finalCustomerDebtAfter = breakdown.debtAmount;
+      writer.set(doc(db, 'customers', resolvedCustomerId), {
+        name: effectiveCustomerName,
+        ...(cleanNewCustomerPhone ? { phone: cleanNewCustomerPhone } : {}),
+        totalDebt: breakdown.debtAmount,
+        createdByUid: user.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else if (input.customer && breakdown.debtAmount > 0) {
+      const prevDebt = roundMoney(Math.max(0, Number(liveCustomerData?.totalDebt) || 0));
+      finalCustomerDebtAfter = roundMoney(prevDebt + breakdown.debtAmount);
+      writer.update(doc(db, 'customers', input.customer.id), {
+        totalDebt: finalCustomerDebtAfter,
+        updatedAt: serverTimestamp(),
+      });
+    } else if (input.customer) {
+      finalCustomerDebtAfter = roundMoney(Math.max(0, Number(liveCustomerData?.totalDebt) || 0));
+    }
+
+    if (breakdown.debtAmount > 0 && resolvedCustomerId) {
+      const recId = generateSafeId('rec');
+      const recMeta = createTransactionMetadata('KBN', user);
+      const debtBalanceAfter = finalCustomerDebtAfter ?? breakdown.debtAmount;
+      writer.set(doc(db, 'receivables', recId), {
+        ...recMeta,
+        customerId: resolvedCustomerId,
+        customerName: effectiveCustomerName,
+        type: 'debt',
+        amount: breakdown.debtAmount,
+        balanceAfter: debtBalanceAfter,
+        sourceType: 'mini_atm',
+        referenceId: txId,
+        ...(breakdown.paidAmount > 0 ? { accountId: input.cashAccount.id } : {}),
+        notes: (
+          breakdown.paidAmount > 0
+            ? `Bon Mini ATM ${serviceLabel} ${meta.transactionNumber} (Tagihan ${formatRupiah(
+                breakdown.totalDue
+              )}, DP ${formatRupiah(breakdown.paidAmount)})`
+            : `Bon Mini ATM ${serviceLabel} ${cleanBank} (${meta.transactionNumber})`
+        ).slice(0, 240),
+        createdAt: serverTimestamp(),
+      });
+    }
 
     writer.set(txRef, {
       ...meta,
       serviceType: input.serviceType,
       paymentChannel: breakdown.paymentChannel,
+      paymentStatus: breakdown.paymentStatus,
       bankName: cleanBank,
       ...(cleanTarget ? { targetAccountNumber: cleanTarget } : {}),
-      ...(cleanCustomer ? { customerName: cleanCustomer } : {}),
+      ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
+      ...(effectiveCustomerName ? { customerName: effectiveCustomerName } : {}),
       principalAmount: breakdown.principalAmount,
       adminFee: breakdown.adminFee,
       bankFee: breakdown.bankFee,
+      paidAmount: breakdown.paidAmount,
+      debtAmount: breakdown.debtAmount,
       ...(breakdown.paymentChannel === 'qris'
         ? {
             qrisVerified: true,
@@ -405,7 +496,9 @@ export async function recordMiniAtmTransaction(
         referenceId: txId,
         description: `Mini ATM ${serviceLabel}${
           breakdown.paymentChannel === 'qris' ? ' (QRIS)' : ''
-        } ${cleanBank}${cleanCustomer ? ` (${cleanCustomer})` : ''}`.slice(0, 240),
+        }${breakdown.paymentStatus === 'debt' ? ' [DP Bon]' : ''} ${cleanBank}${
+          effectiveCustomerName ? ` (${effectiveCustomerName})` : ''
+        }`.slice(0, 240),
         createdAt: serverTimestamp(),
       });
     }
@@ -434,7 +527,7 @@ export async function recordMiniAtmTransaction(
 
   const executeOfflineBatch = async () => {
     const batch = writeBatch(db);
-    applyAccountAndLedgerWrites(input.cashAccount, input.bankAccount, {
+    applyAccountAndLedgerWrites(input.cashAccount, input.bankAccount, input.customer || null, {
       set: (ref, data) => batch.set(ref, data),
       update: (ref, data) => batch.update(ref, data),
     });
@@ -447,17 +540,28 @@ export async function recordMiniAtmTransaction(
     } else {
       try {
         await runTransaction(db, async (tx) => {
-          const [cashSnap, bankSnap] = await Promise.all([tx.get(cashAccRef), tx.get(bankAccRef)]);
+          const [cashSnap, bankSnap, custSnap] = await Promise.all([
+            tx.get(cashAccRef),
+            tx.get(bankAccRef),
+            customerRef ? tx.get(customerRef) : Promise.resolve(null),
+          ]);
           if (!cashSnap.exists()) {
             throw new Error('Akun Laci Kas tidak ditemukan.');
           }
           if (!bankSnap.exists()) {
             throw new Error('Akun Rekening Bank tidak ditemukan.');
           }
-          applyAccountAndLedgerWrites(cashSnap.data() as Account, bankSnap.data() as Account, {
-            set: (ref, data) => tx.set(ref, data),
-            update: (ref, data) => tx.update(ref, data),
-          });
+          const liveCustomerData =
+            custSnap && custSnap.exists() ? (custSnap.data() as Customer) : input.customer || null;
+          applyAccountAndLedgerWrites(
+            cashSnap.data() as Account,
+            bankSnap.data() as Account,
+            liveCustomerData,
+            {
+              set: (ref, data) => tx.set(ref, data),
+              update: (ref, data) => tx.update(ref, data),
+            }
+          );
         });
       } catch (err) {
         if (isOfflineTransactionError(err)) {
@@ -472,6 +576,12 @@ export async function recordMiniAtmTransaction(
       txId,
       transactionNumber: meta.transactionNumber,
       netProfit: breakdown.netProfit,
+      paymentStatus: breakdown.paymentStatus,
+      paidAmount: breakdown.paidAmount,
+      debtAmount: breakdown.debtAmount,
+      customerId: resolvedCustomerId,
+      customerName: effectiveCustomerName || undefined,
+      customerDebtAfter: breakdown.debtAmount > 0 ? finalCustomerDebtAfter : undefined,
     };
   } catch (error) {
     if (error instanceof Error && !error.message.includes('Missing or insufficient permissions')) {
@@ -484,7 +594,8 @@ export async function recordMiniAtmTransaction(
 export async function voidMiniAtmTransaction(
   txDoc: MiniAtmTransaction,
   accounts: Account[],
-  user: { uid: string; displayName: string }
+  user: { uid: string; displayName: string },
+  customers: Customer[] = []
 ): Promise<void> {
   if (txDoc.status === 'void') {
     throw new Error('Transaksi Mini ATM ini sudah dibatalkan (void).');
@@ -496,6 +607,8 @@ export async function voidMiniAtmTransaction(
   const breakdown = calculateMiniAtmBreakdown({
     serviceType: txDoc.serviceType,
     paymentChannel: txDoc.paymentChannel || 'bank_transfer',
+    paymentStatus: txDoc.paymentStatus || 'paid',
+    paidAmount: txDoc.paidAmount,
     allowQrisTarikTunai: true,
     qrisVerified: true,
     qrisMdrRate: txDoc.qrisMdrRate,
@@ -508,17 +621,21 @@ export async function voidMiniAtmTransaction(
 
   const revCashDelta = roundMoney(-breakdown.cashDelta);
   const revBankDelta = roundMoney(-breakdown.bankDelta);
+  const originalDebt = roundMoney(Math.max(0, Number(txDoc.debtAmount) || 0));
 
   const meta = createTransactionMetadata('VATM', user);
   const txRef = doc(db, 'mini_atm_transactions', txDoc.id);
   const cashAccRef = doc(db, 'accounts', txDoc.cashAccountId);
   const bankAccRef = doc(db, 'accounts', txDoc.bankAccountId);
+  const custRef =
+    originalDebt > 0 && txDoc.customerId ? doc(db, 'customers', txDoc.customerId) : null;
   const cashLedgerRef = doc(db, 'cash_ledger', generateSafeId('ldg'));
   const bankLedgerRef = doc(db, 'cash_ledger', generateSafeId('ldg'));
 
   const applyVoidWrites = (
     cashAccData: Pick<Account, 'name' | 'balance'>,
     bankAccData: Pick<Account, 'name' | 'balance'>,
+    custData: Pick<Customer, 'name' | 'totalDebt'> | null,
     writer: {
       set: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
       update: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
@@ -544,16 +661,45 @@ export async function voidMiniAtmTransaction(
       status: 'void',
       updatedAt: serverTimestamp(),
     });
-    writer.update(cashAccRef, {
-      balance: cashAfter,
-      updatedByUid: user.uid,
-      updatedAt: serverTimestamp(),
-    });
-    writer.update(bankAccRef, {
-      balance: bankAfter,
-      updatedByUid: user.uid,
-      updatedAt: serverTimestamp(),
-    });
+    if (revCashDelta !== 0) {
+      writer.update(cashAccRef, {
+        balance: cashAfter,
+        updatedByUid: user.uid,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    if (revBankDelta !== 0) {
+      writer.update(bankAccRef, {
+        balance: bankAfter,
+        updatedByUid: user.uid,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    if (custRef && custData && originalDebt > 0) {
+      const liveDebt = roundMoney(Math.max(0, Number(custData.totalDebt) || 0));
+      const debtToReduce = roundMoney(Math.min(liveDebt, originalDebt));
+      if (debtToReduce > 0) {
+        const balanceAfter = roundMoney(Math.max(0, liveDebt - debtToReduce));
+        writer.update(custRef, {
+          totalDebt: balanceAfter,
+          updatedAt: serverTimestamp(),
+        });
+        const recMeta = createTransactionMetadata('KRV', user);
+        writer.set(doc(db, 'receivables', generateSafeId('rec')), {
+          ...recMeta,
+          customerId: txDoc.customerId!,
+          customerName: (custData.name || txDoc.customerName || 'Pelanggan').slice(0, 100),
+          type: 'payment',
+          amount: debtToReduce,
+          balanceAfter,
+          sourceType: 'mini_atm',
+          referenceId: txDoc.id,
+          notes: `Pembatalan (Void) Bon Mini ATM ${txDoc.transactionNumber}`.slice(0, 240),
+          createdAt: serverTimestamp(),
+        });
+      }
+    }
 
     if (Math.abs(revCashDelta) > 0) {
       writer.set(cashLedgerRef, {
@@ -596,8 +742,9 @@ export async function voidMiniAtmTransaction(
     if (!cashAcc || !bankAcc) {
       throw new Error('Akun kas atau rekening terkait tidak ditemukan.');
     }
+    const cust = txDoc.customerId ? customers.find((c) => c.id === txDoc.customerId) || null : null;
     const batch = writeBatch(db);
-    applyVoidWrites(cashAcc, bankAcc, {
+    applyVoidWrites(cashAcc, bankAcc, cust, {
       set: (ref, data) => batch.set(ref, data),
       update: (ref, data) => batch.update(ref, data),
     });
@@ -610,10 +757,11 @@ export async function voidMiniAtmTransaction(
     } else {
       try {
         await runTransaction(db, async (tx) => {
-          const [txSnap, cashSnap, bankSnap] = await Promise.all([
+          const [txSnap, cashSnap, bankSnap, custSnap] = await Promise.all([
             tx.get(txRef),
             tx.get(cashAccRef),
             tx.get(bankAccRef),
+            custRef ? tx.get(custRef) : Promise.resolve(null),
           ]);
           if (!txSnap.exists()) {
             throw new Error('Transaksi Mini ATM tidak ditemukan.');
@@ -624,7 +772,8 @@ export async function voidMiniAtmTransaction(
           if (!cashSnap.exists() || !bankSnap.exists()) {
             throw new Error('Akun kas atau rekening terkait tidak ditemukan.');
           }
-          applyVoidWrites(cashSnap.data() as Account, bankSnap.data() as Account, {
+          const custData = custSnap && custSnap.exists() ? (custSnap.data() as Customer) : null;
+          applyVoidWrites(cashSnap.data() as Account, bankSnap.data() as Account, custData, {
             set: (ref, data) => tx.set(ref, data),
             update: (ref, data) => tx.update(ref, data),
           });
@@ -689,7 +838,12 @@ export interface RecordPpobInput {
   category: PpobCategory;
   providerName: string;
   targetNumber: string;
+  customer?: Customer | null;
   customerName?: string;
+  autoCreateCustomer?: boolean;
+  newCustomerPhone?: string;
+  paymentStatus?: ServicePaymentStatus;
+  paidAmount?: number;
   capitalPrice: number;
   sellPrice: number;
   adminFee: number;
@@ -707,6 +861,12 @@ export async function recordPpobTransaction(
   transactionNumber: string;
   netProfit: number;
   customerTotal: number;
+  paymentStatus: ServicePaymentStatus;
+  paidAmount: number;
+  debtAmount: number;
+  customerId?: string;
+  customerName?: string;
+  customerDebtAfter?: number;
 }> {
   const cleanProvider = input.providerName.trim().slice(0, 80);
   const cleanTarget = input.targetNumber.trim().slice(0, 50);
@@ -723,28 +883,52 @@ export async function recordPpobTransaction(
     throw new Error(`Akun penerima bayar "${input.cashAccount.name}" sedang nonaktif.`);
   }
 
+  const paymentStatus: ServicePaymentStatus = input.paymentStatus === 'debt' ? 'debt' : 'paid';
+  const cleanTypedCustomer = (input.customerName || '').trim().slice(0, 100);
+  const willAutoCreateCustomer = Boolean(
+    input.autoCreateCustomer &&
+      !input.customer &&
+      cleanTypedCustomer &&
+      cleanTypedCustomer.toLowerCase() !== 'umum'
+  );
+  const cleanNewCustomerPhone = (input.newCustomerPhone || '').trim().slice(0, 24);
+  const effectiveCustomerName = (input.customer?.name || cleanTypedCustomer).slice(0, 100);
+
+  if (paymentStatus === 'debt' && !input.customer && !willAutoCreateCustomer) {
+    throw new Error(
+      'Pilih atau ketik nama pelanggan terlebih dahulu untuk transaksi PPOB berstatus Hutang (Bon).'
+    );
+  }
+
   const breakdown = calculatePpobBreakdown({
     capitalPrice: input.capitalPrice,
     sellPrice: input.sellPrice,
     adminFee: input.adminFee,
+    paymentStatus,
+    paidAmount: input.paidAmount,
   });
 
   const txId = generateSafeId('ppb');
+  const resolvedCustomerId =
+    input.customer?.id || (willAutoCreateCustomer ? generateSafeId('cst') : undefined);
   const meta = createTransactionMetadata('PPB', user);
   const categoryLabel = getPpobCategoryLabel(input.category);
-  const cleanCustomer = (input.customerName || '').trim().slice(0, 100);
   const cleanSn = (input.serialNumber || '').trim().slice(0, 100);
 
   const sameAccount = input.depositAccount.id === input.cashAccount.id;
   const txRef = doc(db, 'ppob_transactions', txId);
   const depAccRef = doc(db, 'accounts', input.depositAccount.id);
   const cashAccRef = doc(db, 'accounts', input.cashAccount.id);
+  const customerRef = input.customer ? doc(db, 'customers', input.customer.id) : null;
   const depLedgerRef = doc(db, 'cash_ledger', generateSafeId('ldg'));
   const cashLedgerRef = doc(db, 'cash_ledger', generateSafeId('ldg'));
+
+  let finalCustomerDebtAfter: number | undefined;
 
   const applyWrites = (
     depAccData: Pick<Account, 'name' | 'balance'>,
     cashAccData: Pick<Account, 'name' | 'balance'>,
+    liveCustomerData: Pick<Customer, 'totalDebt'> | null,
     writer: {
       set: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
       update: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
@@ -760,15 +944,19 @@ export async function recordPpobTransaction(
     }
 
     if (sameAccount) {
-      const mergedAfter = roundMoney(depBefore - breakdown.capitalPrice + breakdown.customerTotal);
+      const mergedAfter = roundMoney(
+        depBefore - breakdown.capitalPrice + breakdown.cashReceiptDelta
+      );
       if (mergedAfter < 0) {
         throw new Error(`Saldo ${depAccData.name} tidak boleh negatif.`);
       }
-      writer.update(depAccRef, {
-        balance: mergedAfter,
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
-      });
+      if (breakdown.capitalPrice > 0 || breakdown.cashReceiptDelta > 0) {
+        writer.update(depAccRef, {
+          balance: mergedAfter,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
+      }
 
       if (breakdown.capitalPrice > 0) {
         const afterModal = roundMoney(depBefore - breakdown.capitalPrice);
@@ -788,7 +976,7 @@ export async function recordPpobTransaction(
         });
       }
 
-      if (breakdown.customerTotal > 0) {
+      if (breakdown.cashReceiptDelta > 0) {
         const beforeReceipt = roundMoney(depBefore - breakdown.capitalPrice);
         writer.set(cashLedgerRef, {
           ...meta,
@@ -796,32 +984,28 @@ export async function recordPpobTransaction(
           accountId: input.depositAccount.id,
           accountName: depAccData.name.slice(0, 80),
           direction: 'in',
-          amount: breakdown.customerTotal,
+          amount: breakdown.cashReceiptDelta,
           balanceBefore: beforeReceipt,
           balanceAfter: mergedAfter,
           sourceModule: 'ppob',
           referenceId: txId,
-          description: `Bayar PPOB ${categoryLabel} ${cleanProvider} (${cleanTarget})`.slice(0, 240),
+          description: `${
+            breakdown.paymentStatus === 'debt' ? 'DP Bon PPOB' : 'Bayar PPOB'
+          } ${categoryLabel} ${cleanProvider} (${cleanTarget})`.slice(0, 240),
           createdAt: serverTimestamp(),
         });
       }
     } else {
       const depAfter = roundMoney(depBefore - breakdown.capitalPrice);
       const cashBefore = roundMoney(Number(cashAccData.balance) || 0);
-      const cashAfter = roundMoney(cashBefore + breakdown.customerTotal);
-
-      writer.update(depAccRef, {
-        balance: depAfter,
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
-      });
-      writer.update(cashAccRef, {
-        balance: cashAfter,
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
-      });
+      const cashAfter = roundMoney(cashBefore + breakdown.cashReceiptDelta);
 
       if (breakdown.capitalPrice > 0) {
+        writer.update(depAccRef, {
+          balance: depAfter,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
         writer.set(depLedgerRef, {
           ...meta,
           transactionNumber: `${meta.transactionNumber}-M`.slice(0, 40),
@@ -838,22 +1022,75 @@ export async function recordPpobTransaction(
         });
       }
 
-      if (breakdown.customerTotal > 0) {
+      if (breakdown.cashReceiptDelta > 0) {
+        writer.update(cashAccRef, {
+          balance: cashAfter,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
         writer.set(cashLedgerRef, {
           ...meta,
           transactionNumber: `${meta.transactionNumber}-J`.slice(0, 40),
           accountId: input.cashAccount.id,
           accountName: cashAccData.name.slice(0, 80),
           direction: 'in',
-          amount: breakdown.customerTotal,
+          amount: breakdown.cashReceiptDelta,
           balanceBefore: cashBefore,
           balanceAfter: cashAfter,
           sourceModule: 'ppob',
           referenceId: txId,
-          description: `Terima PPOB ${categoryLabel} ${cleanProvider} (${cleanTarget})`.slice(0, 240),
+          description: `${
+            breakdown.paymentStatus === 'debt' ? 'DP Bon PPOB' : 'Terima PPOB'
+          } ${categoryLabel} ${cleanProvider} (${cleanTarget})`.slice(0, 240),
           createdAt: serverTimestamp(),
         });
       }
+    }
+
+    if (willAutoCreateCustomer && resolvedCustomerId) {
+      finalCustomerDebtAfter = breakdown.debtAmount;
+      writer.set(doc(db, 'customers', resolvedCustomerId), {
+        name: effectiveCustomerName,
+        ...(cleanNewCustomerPhone ? { phone: cleanNewCustomerPhone } : {}),
+        totalDebt: breakdown.debtAmount,
+        createdByUid: user.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else if (input.customer && breakdown.debtAmount > 0) {
+      const prevDebt = roundMoney(Math.max(0, Number(liveCustomerData?.totalDebt) || 0));
+      finalCustomerDebtAfter = roundMoney(prevDebt + breakdown.debtAmount);
+      writer.update(doc(db, 'customers', input.customer.id), {
+        totalDebt: finalCustomerDebtAfter,
+        updatedAt: serverTimestamp(),
+      });
+    } else if (input.customer) {
+      finalCustomerDebtAfter = roundMoney(Math.max(0, Number(liveCustomerData?.totalDebt) || 0));
+    }
+
+    if (breakdown.debtAmount > 0 && resolvedCustomerId) {
+      const recId = generateSafeId('rec');
+      const recMeta = createTransactionMetadata('KBN', user);
+      const debtBalanceAfter = finalCustomerDebtAfter ?? breakdown.debtAmount;
+      writer.set(doc(db, 'receivables', recId), {
+        ...recMeta,
+        customerId: resolvedCustomerId,
+        customerName: effectiveCustomerName,
+        type: 'debt',
+        amount: breakdown.debtAmount,
+        balanceAfter: debtBalanceAfter,
+        sourceType: 'ppob',
+        referenceId: txId,
+        ...(breakdown.paidAmount > 0 ? { accountId: input.cashAccount.id } : {}),
+        notes: (
+          breakdown.paidAmount > 0
+            ? `Bon PPOB ${cleanProvider} (${cleanTarget}) · ${meta.transactionNumber} (Tagihan ${formatRupiah(
+                breakdown.customerTotal
+              )}, DP ${formatRupiah(breakdown.paidAmount)})`
+            : `Bon PPOB ${cleanProvider} (${cleanTarget}) · ${meta.transactionNumber}`
+        ).slice(0, 240),
+        createdAt: serverTimestamp(),
+      });
     }
 
     writer.set(txRef, {
@@ -861,10 +1098,14 @@ export async function recordPpobTransaction(
       category: input.category,
       providerName: cleanProvider,
       targetNumber: cleanTarget,
-      ...(cleanCustomer ? { customerName: cleanCustomer } : {}),
+      ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
+      ...(effectiveCustomerName ? { customerName: effectiveCustomerName } : {}),
+      paymentStatus: breakdown.paymentStatus,
       capitalPrice: breakdown.capitalPrice,
       sellPrice: breakdown.sellPrice,
       adminFee: breakdown.adminFee,
+      paidAmount: breakdown.paidAmount,
+      debtAmount: breakdown.debtAmount,
       netProfit: breakdown.netProfit,
       accountId: input.depositAccount.id,
       cashAccountId: input.cashAccount.id,
@@ -877,7 +1118,7 @@ export async function recordPpobTransaction(
 
   const executeOfflineBatch = async () => {
     const batch = writeBatch(db);
-    applyWrites(input.depositAccount, input.cashAccount, {
+    applyWrites(input.depositAccount, input.cashAccount, input.customer || null, {
       set: (ref, data) => batch.set(ref, data),
       update: (ref, data) => batch.update(ref, data),
     });
@@ -891,24 +1132,35 @@ export async function recordPpobTransaction(
       try {
         await runTransaction(db, async (tx) => {
           if (sameAccount) {
-            const depSnap = await tx.get(depAccRef);
+            const [depSnap, custSnap] = await Promise.all([
+              tx.get(depAccRef),
+              customerRef ? tx.get(customerRef) : Promise.resolve(null),
+            ]);
             if (!depSnap.exists()) {
               throw new Error('Akun deposit/kas PPOB tidak ditemukan.');
             }
             const accData = depSnap.data() as Account;
-            applyWrites(accData, accData, {
+            const liveCust =
+              custSnap && custSnap.exists() ? (custSnap.data() as Customer) : input.customer || null;
+            applyWrites(accData, accData, liveCust, {
               set: (ref, data) => tx.set(ref, data),
               update: (ref, data) => tx.update(ref, data),
             });
           } else {
-            const [depSnap, cashSnap] = await Promise.all([tx.get(depAccRef), tx.get(cashAccRef)]);
+            const [depSnap, cashSnap, custSnap] = await Promise.all([
+              tx.get(depAccRef),
+              tx.get(cashAccRef),
+              customerRef ? tx.get(customerRef) : Promise.resolve(null),
+            ]);
             if (!depSnap.exists()) {
               throw new Error('Akun deposit PPOB tidak ditemukan.');
             }
             if (!cashSnap.exists()) {
               throw new Error('Akun kas penerima bayar tidak ditemukan.');
             }
-            applyWrites(depSnap.data() as Account, cashSnap.data() as Account, {
+            const liveCust =
+              custSnap && custSnap.exists() ? (custSnap.data() as Customer) : input.customer || null;
+            applyWrites(depSnap.data() as Account, cashSnap.data() as Account, liveCust, {
               set: (ref, data) => tx.set(ref, data),
               update: (ref, data) => tx.update(ref, data),
             });
@@ -928,6 +1180,12 @@ export async function recordPpobTransaction(
       transactionNumber: meta.transactionNumber,
       netProfit: breakdown.netProfit,
       customerTotal: breakdown.customerTotal,
+      paymentStatus: breakdown.paymentStatus,
+      paidAmount: breakdown.paidAmount,
+      debtAmount: breakdown.debtAmount,
+      customerId: resolvedCustomerId,
+      customerName: effectiveCustomerName || undefined,
+      customerDebtAfter: breakdown.debtAmount > 0 ? finalCustomerDebtAfter : undefined,
     };
   } catch (error) {
     if (error instanceof Error && !error.message.includes('Missing or insufficient permissions')) {
@@ -960,7 +1218,8 @@ export async function completePendingPpobTransaction(
 export async function failAndRefundPpobTransaction(
   txDoc: PpobTransaction,
   accounts: Account[],
-  user: { uid: string; displayName: string }
+  user: { uid: string; displayName: string },
+  customers: Customer[] = []
 ): Promise<void> {
   if (txDoc.status === 'failed') {
     throw new Error('Transaksi PPOB ini sudah berstatus gagal / refund.');
@@ -970,7 +1229,12 @@ export async function failAndRefundPpobTransaction(
     capitalPrice: txDoc.capitalPrice,
     sellPrice: txDoc.sellPrice,
     adminFee: txDoc.adminFee,
+    paymentStatus: txDoc.paymentStatus || 'paid',
+    paidAmount: txDoc.paidAmount,
   });
+
+  const cashToRefund = breakdown.cashReceiptDelta;
+  const originalDebt = roundMoney(Math.max(0, Number(txDoc.debtAmount) || 0));
 
   const depositAccId = txDoc.accountId;
   const cashAccId = txDoc.cashAccountId || '';
@@ -980,12 +1244,15 @@ export async function failAndRefundPpobTransaction(
   const txRef = doc(db, 'ppob_transactions', txDoc.id);
   const depAccRef = doc(db, 'accounts', depositAccId);
   const cashAccRef = cashAccId ? doc(db, 'accounts', cashAccId) : null;
+  const custRef =
+    originalDebt > 0 && txDoc.customerId ? doc(db, 'customers', txDoc.customerId) : null;
   const depLedgerRef = doc(db, 'cash_ledger', generateSafeId('ldg'));
   const cashLedgerRef = doc(db, 'cash_ledger', generateSafeId('ldg'));
 
   const applyRefundWrites = (
     depAccData: Pick<Account, 'name' | 'balance'>,
     cashAccData: Pick<Account, 'name' | 'balance'> | null,
+    custData: Pick<Customer, 'name' | 'totalDebt'> | null,
     writer: {
       set: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
       update: (ref: ReturnType<typeof doc>, data: Record<string, unknown>) => void;
@@ -994,17 +1261,19 @@ export async function failAndRefundPpobTransaction(
     const depBefore = roundMoney(Number(depAccData.balance) || 0);
 
     if (sameAccount) {
-      const mergedAfter = roundMoney(depBefore + breakdown.capitalPrice - breakdown.customerTotal);
+      const mergedAfter = roundMoney(depBefore + breakdown.capitalPrice - cashToRefund);
       if (mergedAfter < 0) {
         throw new Error(
           `Saldo ${depAccData.name} (${formatRupiah(depBefore)}) tidak mencukupi untuk refund pelanggan.`
         );
       }
-      writer.update(depAccRef, {
-        balance: mergedAfter,
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
-      });
+      if (breakdown.capitalPrice > 0 || cashToRefund > 0) {
+        writer.update(depAccRef, {
+          balance: mergedAfter,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
+      }
 
       if (breakdown.capitalPrice > 0) {
         const midBal = roundMoney(depBefore + breakdown.capitalPrice);
@@ -1024,7 +1293,7 @@ export async function failAndRefundPpobTransaction(
         });
       }
 
-      if (breakdown.customerTotal > 0) {
+      if (cashToRefund > 0) {
         const midBal = roundMoney(depBefore + breakdown.capitalPrice);
         writer.set(cashLedgerRef, {
           ...meta,
@@ -1032,7 +1301,7 @@ export async function failAndRefundPpobTransaction(
           accountId: depositAccId,
           accountName: depAccData.name.slice(0, 80),
           direction: 'out',
-          amount: breakdown.customerTotal,
+          amount: cashToRefund,
           balanceBefore: midBal,
           balanceAfter: mergedAfter,
           sourceModule: 'ppob',
@@ -1043,13 +1312,12 @@ export async function failAndRefundPpobTransaction(
       }
     } else {
       const depAfter = roundMoney(depBefore + breakdown.capitalPrice);
-      writer.update(depAccRef, {
-        balance: depAfter,
-        updatedByUid: user.uid,
-        updatedAt: serverTimestamp(),
-      });
-
       if (breakdown.capitalPrice > 0) {
+        writer.update(depAccRef, {
+          balance: depAfter,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
         writer.set(depLedgerRef, {
           ...meta,
           transactionNumber: `${meta.transactionNumber}-M`.slice(0, 40),
@@ -1066,13 +1334,13 @@ export async function failAndRefundPpobTransaction(
         });
       }
 
-      if (cashAccRef && cashAccData) {
+      if (cashAccRef && cashAccData && cashToRefund > 0) {
         const cashBefore = roundMoney(Number(cashAccData.balance) || 0);
-        const cashAfter = roundMoney(cashBefore - breakdown.customerTotal);
+        const cashAfter = roundMoney(cashBefore - cashToRefund);
         if (cashAfter < 0) {
           throw new Error(
             `Saldo ${cashAccData.name} (${formatRupiah(cashBefore)}) tidak mencukupi untuk mengembalikan pembayaran pelanggan ${formatRupiah(
-              breakdown.customerTotal
+              cashToRefund
             )}.`
           );
         }
@@ -1081,22 +1349,45 @@ export async function failAndRefundPpobTransaction(
           updatedByUid: user.uid,
           updatedAt: serverTimestamp(),
         });
-        if (breakdown.customerTotal > 0) {
-          writer.set(cashLedgerRef, {
-            ...meta,
-            transactionNumber: `${meta.transactionNumber}-J`.slice(0, 40),
-            accountId: cashAccId,
-            accountName: cashAccData.name.slice(0, 80),
-            direction: 'out',
-            amount: breakdown.customerTotal,
-            balanceBefore: cashBefore,
-            balanceAfter: cashAfter,
-            sourceModule: 'ppob',
-            referenceId: txDoc.id,
-            description: `Refund bayar pelanggan PPOB gagal ${txDoc.transactionNumber}`.slice(0, 240),
-            createdAt: serverTimestamp(),
-          });
-        }
+        writer.set(cashLedgerRef, {
+          ...meta,
+          transactionNumber: `${meta.transactionNumber}-J`.slice(0, 40),
+          accountId: cashAccId,
+          accountName: cashAccData.name.slice(0, 80),
+          direction: 'out',
+          amount: cashToRefund,
+          balanceBefore: cashBefore,
+          balanceAfter: cashAfter,
+          sourceModule: 'ppob',
+          referenceId: txDoc.id,
+          description: `Refund bayar pelanggan PPOB gagal ${txDoc.transactionNumber}`.slice(0, 240),
+          createdAt: serverTimestamp(),
+        });
+      }
+    }
+
+    if (custRef && custData && originalDebt > 0) {
+      const liveDebt = roundMoney(Math.max(0, Number(custData.totalDebt) || 0));
+      const debtToReduce = roundMoney(Math.min(liveDebt, originalDebt));
+      if (debtToReduce > 0) {
+        const balanceAfter = roundMoney(Math.max(0, liveDebt - debtToReduce));
+        writer.update(custRef, {
+          totalDebt: balanceAfter,
+          updatedAt: serverTimestamp(),
+        });
+        const recMeta = createTransactionMetadata('KRP', user);
+        writer.set(doc(db, 'receivables', generateSafeId('rec')), {
+          ...recMeta,
+          customerId: txDoc.customerId!,
+          customerName: (custData.name || txDoc.customerName || 'Pelanggan').slice(0, 100),
+          type: 'payment',
+          amount: debtToReduce,
+          balanceAfter,
+          sourceType: 'ppob',
+          referenceId: txDoc.id,
+          notes: `Refund/Pembatalan Bon PPOB gagal ${txDoc.transactionNumber}`.slice(0, 240),
+          createdAt: serverTimestamp(),
+        });
       }
     }
 
@@ -1112,8 +1403,9 @@ export async function failAndRefundPpobTransaction(
     if (!depAcc) {
       throw new Error('Akun deposit PPOB terkait tidak ditemukan.');
     }
+    const cust = txDoc.customerId ? customers.find((c) => c.id === txDoc.customerId) || null : null;
     const batch = writeBatch(db);
-    applyRefundWrites(depAcc, cashAcc, {
+    applyRefundWrites(depAcc, cashAcc, cust, {
       set: (ref, data) => batch.set(ref, data),
       update: (ref, data) => batch.update(ref, data),
     });
@@ -1126,14 +1418,12 @@ export async function failAndRefundPpobTransaction(
     } else {
       try {
         await runTransaction(db, async (tx) => {
-          const gets = [tx.get(txRef), tx.get(depAccRef)];
-          if (!sameAccount && cashAccRef) {
-            gets.push(tx.get(cashAccRef));
-          }
-          const snaps = await Promise.all(gets);
-          const txSnap = snaps[0];
-          const depSnap = snaps[1];
-          const cashSnap = !sameAccount && cashAccRef ? snaps[2] : null;
+          const [txSnap, depSnap, cashSnap, custSnap] = await Promise.all([
+            tx.get(txRef),
+            tx.get(depAccRef),
+            !sameAccount && cashAccRef ? tx.get(cashAccRef) : Promise.resolve(null),
+            custRef ? tx.get(custRef) : Promise.resolve(null),
+          ]);
 
           if (!txSnap.exists()) {
             throw new Error('Transaksi PPOB tidak ditemukan.');
@@ -1145,6 +1435,8 @@ export async function failAndRefundPpobTransaction(
             throw new Error('Akun deposit PPOB tidak ditemukan.');
           }
 
+          const custData = custSnap && custSnap.exists() ? (custSnap.data() as Customer) : null;
+
           applyRefundWrites(
             depSnap.data() as Account,
             sameAccount
@@ -1152,6 +1444,7 @@ export async function failAndRefundPpobTransaction(
               : cashSnap && cashSnap.exists()
               ? (cashSnap.data() as Account)
               : null,
+            custData,
             {
               set: (ref, data) => tx.set(ref, data),
               update: (ref, data) => tx.update(ref, data),

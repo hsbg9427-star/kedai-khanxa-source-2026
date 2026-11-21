@@ -180,7 +180,7 @@ service cloud.firestore {
 
     function isValidProduct(data) {
       return data.keys().hasAll(['sku', 'name', 'categoryId', 'categoryName', 'unit', 'costPrice', 'sellPrice', 'stock', 'minStock', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['sku', 'barcode', 'name', 'brand', 'variant', 'identityKey', 'barcodeKey', 'photoDataUrl', 'categoryId', 'categoryName', 'unit', 'baseCanBuy', 'baseCanSell', 'costPrice', 'sellPrice', 'wholesalePrice', 'wholesaleMinQty', 'sellUnits', 'stock', 'minStock', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sku', 'barcode', 'name', 'brand', 'variant', 'identityKey', 'barcodeKey', 'photoDataUrl', 'categoryId', 'categoryName', 'unit', 'baseCanBuy', 'baseCanSell', 'costPrice', 'sellPrice', 'wholesalePrice', 'wholesaleMinQty', 'sellUnits', 'stock', 'minStock', 'inputDate', 'expiryDate', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
         data.sku is string && data.sku.size() >= 1 && data.sku.size() <= 40 &&
         isOptString(data, 'barcode', 64) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
@@ -205,6 +205,8 @@ service cloud.firestore {
         )) &&
         data.stock is number &&
         data.minStock is number && data.minStock >= 0 &&
+        (!('inputDate' in data) || isValidDateStr(data.inputDate)) &&
+        (!('expiryDate' in data) || isValidDateStr(data.expiryDate)) &&
         data.isActive is bool &&
         isValidId(data.createdByUid) &&
         data.createdAt is timestamp &&
@@ -258,7 +260,7 @@ service cloud.firestore {
 
     function isValidSale(data) {
       return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'totalItems', 'subtotal', 'discount', 'totalAmount', 'paidAmount', 'changeAmount', 'debtAmount', 'paymentMethod', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'totalItems', 'subtotal', 'discount', 'totalAmount', 'totalCost', 'totalProfit', 'paidAmount', 'changeAmount', 'debtAmount', 'paymentMethod', 'cashPaidPart', 'qrisAmount', 'qrisFeeRate', 'qrisFeeAmount', 'netReceivedAmount', 'accountId', 'qrisAccountId', 'expiredOverrideApproved', 'expiredOverrideByUid', 'expiredOverrideByName', 'expiredOverrideReason', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'totalItems', 'subtotal', 'discount', 'totalAmount', 'totalCost', 'totalProfit', 'paidAmount', 'changeAmount', 'debtAmount', 'paymentMethod', 'cashPaidPart', 'qrisAmount', 'qrisFeeRate', 'qrisFeeAmount', 'netReceivedAmount', 'accountId', 'qrisAccountId', 'expiredOverrideApproved', 'expiredOverrideByUid', 'expiredOverrideByName', 'expiredOverrideReason', 'receivablePaidAmount', 'customerDebtBefore', 'customerDebtAfter', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
         isValidTrxNum(data.transactionNumber) &&
         isValidDateStr(data.transactionDate) &&
         isValidTimeStr(data.transactionTime) &&
@@ -285,6 +287,9 @@ service cloud.firestore {
         (!('expiredOverrideByUid' in data) || isValidId(data.expiredOverrideByUid)) &&
         isOptString(data, 'expiredOverrideByName', 100) &&
         isOptString(data, 'expiredOverrideReason', 200) &&
+        (!('receivablePaidAmount' in data) || (data.receivablePaidAmount is number && data.receivablePaidAmount >= 0)) &&
+        (!('customerDebtBefore' in data) || (data.customerDebtBefore is number && data.customerDebtBefore >= 0)) &&
+        (!('customerDebtAfter' in data) || (data.customerDebtAfter is number && data.customerDebtAfter >= 0)) &&
         data.status in ['completed', 'void'] &&
         isValidId(data.recordedByUid) &&
         data.recordedByName is string && data.recordedByName.size() >= 1 && data.recordedByName.size() <= 100 &&
@@ -442,7 +447,7 @@ service cloud.firestore {
 
     function isValidReceivable(data) {
       return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'type', 'amount', 'balanceAfter', 'recordedByUid', 'recordedByName', 'createdAt']) &&
-        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'type', 'amount', 'balanceAfter', 'saleId', 'accountId', 'notes', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'customerId', 'customerName', 'type', 'amount', 'balanceAfter', 'sourceType', 'referenceId', 'saleId', 'accountId', 'notes', 'recordedByUid', 'recordedByName', 'createdAt']) &&
         isValidTrxNum(data.transactionNumber) &&
         isValidDateStr(data.transactionDate) &&
         isValidTimeStr(data.transactionTime) &&
@@ -451,6 +456,8 @@ service cloud.firestore {
         data.type in ['debt', 'payment'] &&
         data.amount is number && data.amount > 0 &&
         data.balanceAfter is number && data.balanceAfter >= 0 &&
+        (!('sourceType' in data) || data.sourceType in ['sale', 'ppob', 'mini_atm', 'manual']) &&
+        isOptString(data, 'referenceId', 128) &&
         isOptString(data, 'saleId', 128) &&
         isOptString(data, 'accountId', 128) &&
         isOptString(data, 'notes', 240) &&
@@ -461,7 +468,7 @@ service cloud.firestore {
 
     function isValidLoan(data) {
       return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'borrowerName', 'loanDate', 'dueDate', 'principalAmount', 'paidAmount', 'remainingAmount', 'sourceAccountId', 'sourceAccountName', 'sourceAccountType', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'borrowerName', 'borrowerPhone', 'loanDate', 'dueDate', 'principalAmount', 'paidAmount', 'remainingAmount', 'sourceAccountId', 'sourceAccountName', 'sourceAccountType', 'status', 'notes', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'borrowerName', 'borrowerPhone', 'loanDate', 'dueDate', 'principalAmount', 'paidAmount', 'remainingAmount', 'adminFee', 'adminFeePaid', 'sourceAccountId', 'sourceAccountName', 'sourceAccountType', 'status', 'notes', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
         isValidTrxNum(data.transactionNumber) &&
         isValidDateStr(data.transactionDate) &&
         isValidTimeStr(data.transactionTime) &&
@@ -472,6 +479,8 @@ service cloud.firestore {
         data.principalAmount is number && data.principalAmount > 0 &&
         data.paidAmount is number && data.paidAmount >= 0 &&
         data.remainingAmount is number && data.remainingAmount >= 0 &&
+        (!('adminFee' in data) || (data.adminFee is number && data.adminFee >= 0)) &&
+        (!('adminFeePaid' in data) || (data.adminFeePaid is number && data.adminFeePaid >= 0)) &&
         isValidId(data.sourceAccountId) &&
         data.sourceAccountName is string && data.sourceAccountName.size() >= 1 && data.sourceAccountName.size() <= 80 &&
         data.sourceAccountType in ['cash', 'bank', 'ewallet', 'ppob_deposit'] &&
@@ -485,7 +494,7 @@ service cloud.firestore {
 
     function isValidLoanPayment(data) {
       return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'loanId', 'loanNumber', 'borrowerName', 'amount', 'remainingBefore', 'remainingAfter', 'accountId', 'accountName', 'recordedByUid', 'recordedByName', 'createdAt']) &&
-        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'loanId', 'loanNumber', 'borrowerName', 'amount', 'remainingBefore', 'remainingAfter', 'accountId', 'accountName', 'notes', 'recordedByUid', 'recordedByName', 'createdAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'loanId', 'loanNumber', 'borrowerName', 'amount', 'principalPaid', 'adminFeePaid', 'remainingBefore', 'remainingAfter', 'accountId', 'accountName', 'notes', 'recordedByUid', 'recordedByName', 'createdAt']) &&
         isValidTrxNum(data.transactionNumber) &&
         isValidDateStr(data.transactionDate) &&
         isValidTimeStr(data.transactionTime) &&
@@ -493,6 +502,8 @@ service cloud.firestore {
         isValidTrxNum(data.loanNumber) &&
         data.borrowerName is string && data.borrowerName.size() >= 1 && data.borrowerName.size() <= 100 &&
         data.amount is number && data.amount > 0 &&
+        (!('principalPaid' in data) || (data.principalPaid is number && data.principalPaid >= 0 && data.principalPaid <= data.amount)) &&
+        (!('adminFeePaid' in data) || (data.adminFeePaid is number && data.adminFeePaid >= 0 && data.adminFeePaid <= data.amount)) &&
         data.remainingBefore is number && data.remainingBefore >= 0 &&
         data.remainingAfter is number && data.remainingAfter >= 0 &&
         isValidId(data.accountId) &&
@@ -564,18 +575,22 @@ service cloud.firestore {
 
     function isValidMiniAtm(data) {
       return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'serviceType', 'bankName', 'principalAmount', 'adminFee', 'bankFee', 'netProfit', 'cashAccountId', 'bankAccountId', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'serviceType', 'paymentChannel', 'bankName', 'targetAccountNumber', 'customerName', 'principalAmount', 'adminFee', 'bankFee', 'qrisVerified', 'transferVerified', 'qrisMdrRate', 'qrisMdrAmount', 'internalExtraFee', 'externalReferenceNumber', 'transferProofDataUrl', 'standardAdminFee', 'standardBankFee', 'feeOverridden', 'feeOverrideReason', 'netProfit', 'cashAccountId', 'bankAccountId', 'notes', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'serviceType', 'paymentChannel', 'paymentStatus', 'bankName', 'targetAccountNumber', 'customerId', 'customerName', 'principalAmount', 'adminFee', 'bankFee', 'paidAmount', 'debtAmount', 'qrisVerified', 'transferVerified', 'qrisMdrRate', 'qrisMdrAmount', 'internalExtraFee', 'externalReferenceNumber', 'transferProofDataUrl', 'standardAdminFee', 'standardBankFee', 'feeOverridden', 'feeOverrideReason', 'netProfit', 'cashAccountId', 'bankAccountId', 'notes', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
         isValidTrxNum(data.transactionNumber) &&
         isValidDateStr(data.transactionDate) &&
         isValidTimeStr(data.transactionTime) &&
         data.serviceType in ['tarik_tunai', 'transfer', 'setor_tunai'] &&
         (!('paymentChannel' in data) || data.paymentChannel in ['bank_transfer', 'qris']) &&
+        (!('paymentStatus' in data) || data.paymentStatus in ['paid', 'debt']) &&
         data.bankName is string && data.bankName.size() >= 1 && data.bankName.size() <= 60 &&
         isOptString(data, 'targetAccountNumber', 40) &&
+        isOptString(data, 'customerId', 128) &&
         isOptString(data, 'customerName', 100) &&
         data.principalAmount is number && data.principalAmount > 0 &&
         data.adminFee is number && data.adminFee >= 0 &&
         data.bankFee is number && data.bankFee >= 0 &&
+        (!('paidAmount' in data) || (data.paidAmount is number && data.paidAmount >= 0)) &&
+        (!('debtAmount' in data) || (data.debtAmount is number && data.debtAmount >= 0)) &&
         (!('qrisVerified' in data) || data.qrisVerified is bool) &&
         (!('transferVerified' in data) || data.transferVerified is bool) &&
         (!('qrisMdrRate' in data) || (data.qrisMdrRate is number && data.qrisMdrRate >= 0 && data.qrisMdrRate <= 10)) &&
@@ -587,7 +602,7 @@ service cloud.firestore {
         (!('standardBankFee' in data) || (data.standardBankFee is number && data.standardBankFee >= 0)) &&
         (!('feeOverridden' in data) || data.feeOverridden is bool) &&
         isOptString(data, 'feeOverrideReason', 200) &&
-        (!('paymentChannel' in data) || data.paymentChannel != 'qris' || (data.serviceType == 'tarik_tunai' && ('qrisVerified' in data) && data.qrisVerified == true)) &&
+        (!('paymentChannel' in data) || data.paymentChannel != 'qris' || (data.serviceType == 'tarik_tunai' && ('qrisVerified' in data) && data.qrisVerified == true && (!('paymentStatus' in data) || data.paymentStatus == 'paid'))) &&
         data.netProfit is number &&
         isValidId(data.cashAccountId) &&
         isValidId(data.bankAccountId) &&
@@ -601,17 +616,21 @@ service cloud.firestore {
 
     function isValidPpob(data) {
       return data.keys().hasAll(['transactionNumber', 'transactionDate', 'transactionTime', 'category', 'providerName', 'targetNumber', 'capitalPrice', 'sellPrice', 'adminFee', 'netProfit', 'accountId', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'category', 'providerName', 'targetNumber', 'customerName', 'capitalPrice', 'sellPrice', 'adminFee', 'netProfit', 'accountId', 'cashAccountId', 'serialNumber', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['transactionNumber', 'transactionDate', 'transactionTime', 'category', 'providerName', 'targetNumber', 'customerId', 'customerName', 'paymentStatus', 'capitalPrice', 'sellPrice', 'adminFee', 'paidAmount', 'debtAmount', 'netProfit', 'accountId', 'cashAccountId', 'serialNumber', 'status', 'recordedByUid', 'recordedByName', 'createdAt', 'updatedAt']) &&
         isValidTrxNum(data.transactionNumber) &&
         isValidDateStr(data.transactionDate) &&
         isValidTimeStr(data.transactionTime) &&
         data.category in ['pulsa', 'paket_data', 'pln', 'pdam', 'bpjs', 'ewallet', 'lainnya'] &&
         data.providerName is string && data.providerName.size() >= 1 && data.providerName.size() <= 80 &&
         data.targetNumber is string && data.targetNumber.size() >= 3 && data.targetNumber.size() <= 50 &&
+        isOptString(data, 'customerId', 128) &&
         isOptString(data, 'customerName', 100) &&
+        (!('paymentStatus' in data) || data.paymentStatus in ['paid', 'debt']) &&
         data.capitalPrice is number && data.capitalPrice >= 0 &&
         data.sellPrice is number && data.sellPrice >= 0 &&
         data.adminFee is number && data.adminFee >= 0 &&
+        (!('paidAmount' in data) || (data.paidAmount is number && data.paidAmount >= 0)) &&
+        (!('debtAmount' in data) || (data.debtAmount is number && data.debtAmount >= 0)) &&
         data.netProfit is number &&
         isValidId(data.accountId) &&
         isOptString(data, 'cashAccountId', 128) &&
@@ -988,7 +1007,7 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           (isAdmin() && (incoming().stock >= 0 || incoming().stock == existing().stock)) ||
-          (incoming().stock >= 0 && incoming().stock <= existing().stock && incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt']))
+          (incoming().stock >= 0 && incoming().stock <= existing().stock + 0.0001 && incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt']))
         );
       allow delete: if isAdmin() && isValidId(productId);
     }
@@ -1162,6 +1181,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         incoming().paidAmount == 0 &&
         incoming().remainingAmount == incoming().principalAmount &&
+        (!('adminFeePaid' in incoming()) || incoming().adminFeePaid == 0) &&
         incoming().status == 'unpaid' &&
         exists(/databases/$(database)/documents/accounts/$(incoming().sourceAccountId));
       allow update: if isAdmin() && isValidId(loanId) && isValidLoan(incoming()) &&
@@ -1264,7 +1284,7 @@ service cloud.firestore {
         incoming().updatedByUid == request.auth.uid &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          (incoming().balance >= 0 && incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'updatedByUid', 'updatedAt']))
+          ((incoming().balance >= 0 || incoming().balance >= existing().balance) && incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'updatedByUid', 'updatedAt']))
         );
       allow delete: if isAdmin() && isValidId(accountId);
     }
@@ -1378,7 +1398,7 @@ service cloud.firestore {
           isAdmin() ||
           (incoming().diff(existing()).affectedKeys().hasOnly(['remainingBaseQty', 'status', 'updatedAt']) &&
             incoming().remainingBaseQty >= 0 &&
-            incoming().remainingBaseQty <= existing().remainingBaseQty &&
+            incoming().remainingBaseQty <= existing().remainingBaseQty + 0.0001 &&
             incoming().status in ['active', 'depleted'])
         );
       allow delete: if isAdmin() && isValidId(batchId);

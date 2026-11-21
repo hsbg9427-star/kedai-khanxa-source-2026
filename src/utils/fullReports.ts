@@ -18,7 +18,12 @@ import type {
   SupplierPayment,
 } from '../types/database';
 import { getTodayDateString } from './formatters';
-import { getLoanDisplayStatus, getPeriodDateRange, type ReportPeriodType } from './qrisFee';
+import {
+  getLoanDisplayStatus,
+  getLoanPaymentBreakdown,
+  getPeriodDateRange,
+  type ReportPeriodType,
+} from './qrisFee';
 import { roundMoney, roundQty } from './unitConversion';
 
 export type ExtendedReportPeriodType = ReportPeriodType | 'range';
@@ -603,6 +608,7 @@ export interface ProfitLossReport {
   ppobCount: number;
   ppobVolume: number;
   ppobProfit: number;
+  loanAdminFeeProfit: number;
   serviceProfitTotal: number;
   qrisTransactionCount: number;
   qrisGrossVolume: number;
@@ -617,6 +623,7 @@ export interface ProfitLossReport {
     loansDisbursedAmount: number;
     loanPaymentsCount: number;
     loanPaymentsAmount: number;
+    loanAdminFeesAmount: number;
     kasbonPaymentsAmount: number;
     capitalInAmount: number;
     capitalOutAmount: number;
@@ -1040,14 +1047,24 @@ export function computeProfitAndLossReport(params: {
     periodPpobs.reduce((s, t) => s + (Number(t.netProfit) || 0), 0)
   );
 
-  const serviceProfitTotal = roundMoney(miniAtmProfit + ppobProfit);
+  const periodLoanPayments = loanPayments.filter((p) => inRange(p.transactionDate));
+  let loanPaymentsAmount = 0;
+  let loanAdminFeesAmount = 0;
+  for (const p of periodLoanPayments) {
+    const parts = getLoanPaymentBreakdown(p);
+    loanPaymentsAmount = roundMoney(loanPaymentsAmount + parts.principalPaid);
+    loanAdminFeesAmount = roundMoney(loanAdminFeesAmount + parts.adminFeePaid);
+  }
+
+  const loanAdminFeeProfit = loanAdminFeesAmount;
+  const serviceProfitTotal = roundMoney(miniAtmProfit + ppobProfit + loanAdminFeeProfit);
 
   const periodExpenses = expenses.filter((e) => inRange(e.transactionDate));
   const expensesTotal = roundMoney(
     periodExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0)
   );
 
-  // Laba Bersih = (Laba Kotor + Komisi Jasa Mini ATM & PPOB) - Biaya QRIS - Biaya Operasional
+  // Laba Bersih = (Laba Kotor + Komisi Jasa Mini ATM, PPOB & Biaya Admin Pinjaman) - Biaya QRIS - Biaya Operasional
   const netOperatingProfit = roundMoney(
     salesGrossProfit + serviceProfitTotal - qrisFeeTotal - expensesTotal
   );
@@ -1056,11 +1073,6 @@ export function computeProfitAndLossReport(params: {
   const periodLoans = loans.filter((l) => inRange(l.loanDate || l.transactionDate));
   const loansDisbursedAmount = roundMoney(
     periodLoans.reduce((s, l) => s + (Number(l.principalAmount) || 0), 0)
-  );
-
-  const periodLoanPayments = loanPayments.filter((p) => inRange(p.transactionDate));
-  const loanPaymentsAmount = roundMoney(
-    periodLoanPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0)
   );
 
   const periodLedger = cashLedger.filter((l) => inRange(l.transactionDate));
@@ -1124,6 +1136,7 @@ export function computeProfitAndLossReport(params: {
     ppobCount: periodPpobs.length,
     ppobVolume,
     ppobProfit,
+    loanAdminFeeProfit,
     serviceProfitTotal,
     qrisTransactionCount,
     qrisGrossVolume,
@@ -1137,6 +1150,7 @@ export function computeProfitAndLossReport(params: {
       loansDisbursedAmount,
       loanPaymentsCount: periodLoanPayments.length,
       loanPaymentsAmount,
+      loanAdminFeesAmount,
       kasbonPaymentsAmount,
       capitalInAmount,
       capitalOutAmount,

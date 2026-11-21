@@ -1,14 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Banknote,
   Calculator,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Coins,
   ClipboardCheck,
   Clock,
   Eye,
   Lock,
   RefreshCw,
   ShieldCheck,
+  Wallet,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -33,6 +38,7 @@ import {
 } from '../utils/cashierClosing';
 import { formatRupiah, getTodayDateString } from '../utils/formatters';
 import { getReadableFirestoreError } from '../utils/firestoreError';
+import { roundMoney } from '../utils/unitConversion';
 
 interface ClosingKasirPageProps {
   accounts: Account[];
@@ -91,6 +97,39 @@ export function ClosingKasirPage({ accounts }: ClosingKasirPageProps) {
   const [openingCash, setOpeningCash] = useState('0');
   const [actualCash, setActualCash] = useState('');
   const [notes, setNotes] = useState('');
+  const [applyAdjustment, setApplyAdjustment] = useState(true);
+  const [adjustmentDescription, setAdjustmentDescription] = useState('');
+
+  const [digitalRealBalances, setDigitalRealBalances] = useState<Record<string, string>>({});
+  const [digitalApplyMap, setDigitalApplyMap] = useState<Record<string, boolean>>({});
+  const [digitalDescMap, setDigitalDescMap] = useState<Record<string, string>>({});
+
+  const digitalAccounts = useMemo(() => {
+    return accounts.filter((a) => a.isActive && (a.type === 'bank' || a.type === 'ewallet'));
+  }, [accounts]);
+
+  const preparedDigitalAdjustments = useMemo(() => {
+    return digitalAccounts.map((acc) => {
+      const realStr = digitalRealBalances[acc.id] ?? '';
+      const hasReal = realStr.trim() !== '';
+      const realVal = hasReal ? Math.max(0, Number(realStr) || 0) : Number(acc.balance) || 0;
+      const expected = Number(acc.balance) || 0;
+      const variance = roundMoney(realVal - expected);
+      const apply = digitalApplyMap[acc.id] ?? (variance !== 0);
+      const desc = digitalDescMap[acc.id] || '';
+      return {
+        accountId: acc.id,
+        accountName: acc.name,
+        accountType: acc.type,
+        expectedBalance: expected,
+        realBalance: realVal,
+        variance,
+        applyAdjustment: apply,
+        adjustmentDescription: desc,
+        hasRealInput: hasReal,
+      };
+    });
+  }, [digitalAccounts, digitalRealBalances, digitalApplyMap, digitalDescMap]);
 
   const [sourceSnapshot, setSourceSnapshot] = useState<ClosingSourceSnapshot | null>(null);
   const [loadingSnapshot, setLoadingSnapshot] = useState(false);
@@ -99,6 +138,30 @@ export function ClosingKasirPage({ accounts }: ClosingKasirPageProps) {
   const submitLockRef = useRef(false);
 
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const [showDenomCalculator, setShowDenomCalculator] = useState(false);
+  const [showAccountCheck, setShowAccountCheck] = useState(false);
+  const [denominations, setDenominations] = useState<Record<number, string>>({
+    100000: '',
+    50000: '',
+    20000: '',
+    10000: '',
+    5000: '',
+    2000: '',
+    1000: '',
+    500: '',
+    200: '',
+    100: '',
+  });
+
+  const denominationTotal = useMemo(() => {
+    let sum = 0;
+    Object.entries(denominations).forEach(([denom, countStr]) => {
+      const c = Number(countStr) || 0;
+      sum += c * Number(denom);
+    });
+    return sum;
+  }, [denominations]);
 
   // Filter Riwayat (terutama untuk Admin)
   const [cashierFilter, setCashierFilter] = useState<string>('all');
@@ -235,6 +298,11 @@ export function ClosingKasirPage({ accounts }: ClosingKasirPageProps) {
           openingCash: Math.max(0, Number(openingCash) || 0),
           actualCash: parsedActualCash,
           notes,
+          applyAdjustment,
+          adjustmentDescription,
+          digitalAdjustments: preparedDigitalAdjustments
+            .filter((d) => d.hasRealInput)
+            .map(({ hasRealInput: _, ...rest }) => rest),
           breakdown,
         },
         {
@@ -608,6 +676,223 @@ export function ClosingKasirPage({ accounts }: ClosingKasirPageProps) {
                 </div>
 
                 <form onSubmit={handleRequestFinalize} className="space-y-4">
+                  {/* Form Check Kas & Saldo (Akun & Kalkulator Pecahan) */}
+                  <div className="space-y-3 p-3.5 rounded-xl border border-slate-200 bg-slate-50/70">
+                    <div className="text-xs font-bold text-slate-800">
+                      Form Check Kas &amp; Saldo Rekening
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAccountCheck(!showAccountCheck)}
+                        className="min-h-[40px] px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center justify-between cursor-pointer"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <Wallet className="w-4 h-4 text-emerald-700 shrink-0" />
+                          <span className="truncate">Cek Saldo ({accounts.length})</span>
+                        </span>
+                        {showAccountCheck ? <ChevronUp className="w-4 h-4 shrink-0" /> : <ChevronDown className="w-4 h-4 shrink-0" />}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setShowDenomCalculator(!showDenomCalculator)}
+                        className="min-h-[40px] px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center justify-between cursor-pointer"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <Coins className="w-4 h-4 text-emerald-700 shrink-0" />
+                          <span className="truncate">Kalkulator Uang</span>
+                        </span>
+                        {showDenomCalculator ? <ChevronUp className="w-4 h-4 shrink-0" /> : <ChevronDown className="w-4 h-4 shrink-0" />}
+                      </button>
+                    </div>
+
+                    {showAccountCheck && (
+                      <div className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-3 text-xs">
+                        <div className="font-semibold text-slate-800 border-b border-slate-100 pb-1.5">
+                          Saldo Kas &amp; Rekening Aktif
+                        </div>
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                          {accounts.map((acc) => (
+                            <div key={acc.id} className="flex items-center justify-between py-1 border-b border-slate-50">
+                              <div>
+                                <span className="font-medium text-slate-900">{acc.name}</span>
+                                <span className="text-[10px] text-slate-400 ml-1 uppercase">({acc.type})</span>
+                              </div>
+                              <span className="font-mono-num font-semibold text-emerald-700">
+                                {formatRupiah(acc.balance)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+
+                        {digitalAccounts.length > 0 && (
+                          <div className="pt-3 border-t border-slate-200 space-y-3">
+                            <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                              <Wallet className="w-4 h-4 text-emerald-700" />
+                              <span>Kolom Saldo Real Akun Digital / Rekening ({digitalAccounts.length})</span>
+                            </div>
+                            <div className="space-y-3">
+                              {digitalAccounts.map((acc) => {
+                                const realStr = digitalRealBalances[acc.id] ?? '';
+                                const expected = Number(acc.balance) || 0;
+                                const realVal = realStr.trim() !== '' ? Number(realStr) || 0 : expected;
+                                const variance = roundMoney(realVal - expected);
+                                const apply = digitalApplyMap[acc.id] ?? true;
+                                const desc = digitalDescMap[acc.id] || '';
+
+                                return (
+                                  <div key={acc.id} className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 space-y-2">
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-semibold text-slate-900">{acc.name} ({acc.type})</span>
+                                      <span className="font-mono-num text-slate-500 text-[11px]">Sistem: {formatRupiah(expected)}</span>
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                      <div>
+                                        <label htmlFor={`dig-real-${acc.id}`} className="block text-[10px] font-medium text-slate-600 mb-1">
+                                          Saldo Real (M-Banking/Aplikasi)
+                                        </label>
+                                        <input
+                                          id={`dig-real-${acc.id}`}
+                                          type="number"
+                                          min="0"
+                                          step="any"
+                                          value={realStr}
+                                          onChange={(e) =>
+                                            setDigitalRealBalances((prev) => ({ ...prev, [acc.id]: e.target.value }))
+                                          }
+                                          placeholder="Masukkan saldo real..."
+                                          className="w-full min-h-[34px] px-2.5 py-1 rounded border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                                        />
+                                      </div>
+                                      <div>
+                                        <div className="text-[10px] font-medium text-slate-600 mb-1">Selisih Rekening</div>
+                                        <div className={`font-mono-num font-bold text-xs py-1.5 ${variance === 0 ? 'text-slate-700' : variance > 0 ? 'text-emerald-700' : 'text-red-700'}`}>
+                                          {variance > 0 ? '+' : ''}{formatRupiah(variance)}
+                                          {variance !== 0 && (
+                                            <span className="text-[9px] font-normal ml-1 px-1 py-0.5 rounded bg-slate-100 text-slate-600 uppercase">
+                                              {variance > 0 ? 'Lebih' : 'Kurang'}
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {realStr.trim() !== '' && variance !== 0 && (
+                                      <div className="space-y-1.5 pt-2 border-t border-slate-200">
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                          <input
+                                            type="checkbox"
+                                            checked={apply}
+                                            onChange={(e) =>
+                                              setDigitalApplyMap((prev) => ({ ...prev, [acc.id]: e.target.checked }))
+                                            }
+                                            className="w-3.5 h-3.5 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
+                                          />
+                                          <span className="text-[11px] font-semibold text-slate-800">
+                                            Terapkan Penyesuaian Saldo Digital
+                                          </span>
+                                        </label>
+                                        {apply && (
+                                          <input
+                                            type="text"
+                                            maxLength={150}
+                                            value={desc}
+                                            onChange={(e) =>
+                                              setDigitalDescMap((prev) => ({ ...prev, [acc.id]: e.target.value }))
+                                            }
+                                            placeholder="Keterangan penyesuaian saldo digital..."
+                                            className="w-full min-h-[32px] px-2 py-1 rounded border border-slate-300 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                                          />
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {showDenomCalculator && (
+                      <div className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-3 text-xs">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                          <span className="font-semibold text-slate-900 inline-flex items-center gap-1.5">
+                            <Banknote className="w-4 h-4 text-emerald-700" />
+                            <span>Hitung Pecahan Uang (Kas Opname)</span>
+                          </span>
+                          <span className="font-mono-num font-bold text-emerald-700 text-sm">
+                            {formatRupiah(denominationTotal)}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1">
+                          {[100000, 50000, 20000, 10000, 5000, 2000, 1000, 500, 200, 100].map((denom) => {
+                            const countStr = denominations[denom] || '';
+                            const subtotal = (Number(countStr) || 0) * denom;
+                            return (
+                              <div key={denom} className="rounded-lg border border-slate-200 p-2 space-y-1 bg-slate-50/50">
+                                <div className="flex justify-between font-semibold text-[11px] text-slate-700">
+                                  <span>{formatRupiah(denom)}</span>
+                                  <span className="font-mono-num text-[10px] text-slate-500">
+                                    {subtotal > 0 ? formatRupiah(subtotal) : ''}
+                                  </span>
+                                </div>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="1"
+                                  placeholder="Jml"
+                                  value={countStr}
+                                  onChange={(e) =>
+                                    setDenominations((prev) => ({ ...prev, [denom]: e.target.value }))
+                                  }
+                                  className="w-full min-h-[32px] px-2 py-1 rounded border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDenominations({
+                                100000: '',
+                                50000: '',
+                                20000: '',
+                                10000: '',
+                                5000: '',
+                                2000: '',
+                                1000: '',
+                                500: '',
+                                200: '',
+                                100: '',
+                              })
+                            }
+                            className="text-[11px] text-slate-500 hover:text-slate-800 underline cursor-pointer"
+                          >
+                            Reset
+                          </button>
+                          <button
+                            type="button"
+                            disabled={denominationTotal <= 0}
+                            onClick={() => {
+                              setActualCash(String(denominationTotal));
+                              setShowDenomCalculator(false);
+                            }}
+                            className="min-h-[36px] px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 disabled:opacity-50 cursor-pointer"
+                          >
+                            Gunakan ({formatRupiah(denominationTotal)})
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="space-y-1.5">
                     <label
                       htmlFor="cls-actual-cash"
@@ -629,21 +914,70 @@ export function ClosingKasirPage({ accounts }: ClosingKasirPageProps) {
                   </div>
 
                   {liveVariance && (
-                    <div
-                      className={`rounded-lg border p-3.5 space-y-1.5 ${getStatusBadgeClass(
-                        liveVariance.status
-                      )}`}
-                    >
-                      <div className="flex items-center justify-between text-xs font-semibold">
-                        <span>Status Rekonsiliasi</span>
-                        <span className="uppercase">{liveVariance.statusLabel}</span>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                        <span className="font-semibold text-xs sm:text-sm text-slate-900 flex items-center gap-1.5">
+                          <ClipboardCheck className="w-4 h-4 text-emerald-700" />
+                          <span>Laporan Penyesuaian Saldo</span>
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded border text-[10px] font-bold ${getStatusBadgeClass(
+                            liveVariance.status
+                          )}`}
+                        >
+                          {liveVariance.statusLabel}
+                        </span>
                       </div>
-                      <div className="flex items-center justify-between text-sm font-mono-num font-bold">
-                        <span>Selisih (Fisik - Seharusnya)</span>
-                        <span>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs font-mono-num">
+                        <div className="bg-white p-2 rounded border border-slate-200">
+                          <span className="text-slate-500 block text-[10px]">Saldo Seharusnya</span>
+                          <span className="font-bold text-slate-900">{formatRupiah(liveVariance.expectedCash)}</span>
+                        </div>
+                        <div className="bg-white p-2 rounded border border-slate-200">
+                          <span className="text-slate-500 block text-[10px]">Saldo Real (Fisik)</span>
+                          <span className="font-bold text-emerald-700">{formatRupiah(liveVariance.actualCash)}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs font-mono-num pt-1 border-t border-slate-200">
+                        <span className="font-medium text-slate-700">Selisih Penyesuaian:</span>
+                        <span className={`font-bold ${liveVariance.varianceAmount >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>
                           {liveVariance.varianceAmount > 0 ? '+' : ''}
                           {formatRupiah(liveVariance.varianceAmount)}
                         </span>
+                      </div>
+
+                      <div className="space-y-2 pt-2 border-t border-slate-200">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={applyAdjustment}
+                            onChange={(e) => setApplyAdjustment(e.target.checked)}
+                            className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
+                          />
+                          <span className="text-xs font-semibold text-slate-800">
+                            Terapkan Penyesuaian Saldo (Rekonsiliasi Otomatis)
+                          </span>
+                        </label>
+
+                        {applyAdjustment && (
+                          <div className="space-y-1">
+                            <label htmlFor="cls-adj-desc" className="block text-[11px] font-medium text-slate-700">
+                              Keterangan Penyesuaian Saldo *
+                            </label>
+                            <input
+                              id="cls-adj-desc"
+                              type="text"
+                              required={applyAdjustment}
+                              maxLength={200}
+                              value={adjustmentDescription}
+                              onChange={(e) => setAdjustmentDescription(e.target.value)}
+                              placeholder="Contoh: Selisih uang kembalian / pembulatan kasir / penyesuaian fisik laci"
+                              className="w-full min-h-[38px] px-3 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-600 bg-white"
+                            />
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}

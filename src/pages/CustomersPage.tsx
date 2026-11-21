@@ -817,13 +817,29 @@ export function CustomersPage({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-sm">
-                  {filteredHistory.map((r) => (
+                  {filteredHistory.map((r) => {
+                    const resolvedSource =
+                      r.sourceType || (r.saleId ? 'sale' : 'manual');
+                    const sourceBadge =
+                      resolvedSource === 'ppob'
+                        ? { label: 'PPOB', cls: 'bg-sky-50 text-sky-800 border-sky-200' }
+                        : resolvedSource === 'mini_atm'
+                        ? { label: 'Mini ATM', cls: 'bg-indigo-50 text-indigo-800 border-indigo-200' }
+                        : resolvedSource === 'sale'
+                        ? { label: 'Kasir', cls: 'bg-emerald-50 text-emerald-800 border-emerald-200' }
+                        : { label: 'Manual', cls: 'bg-slate-50 text-slate-700 border-slate-200' };
+                    return (
                     <tr key={r.id} className="hover:bg-slate-50">
                       <td className="py-3 px-4 font-mono-num text-xs text-slate-600 whitespace-nowrap">
                         {r.transactionDate} · {r.transactionTime}
                       </td>
                       <td className="py-3 px-4 font-mono-num text-xs font-semibold text-slate-900 whitespace-nowrap">
-                        {r.transactionNumber}
+                        <div>{r.transactionNumber}</div>
+                        <span
+                          className={`inline-block mt-0.5 px-1.5 py-0.5 rounded border text-[10px] font-sans font-semibold ${sourceBadge.cls}`}
+                        >
+                          {sourceBadge.label}
+                        </span>
                       </td>
                       <td className="py-3 px-4 font-medium text-slate-900 whitespace-nowrap">
                         {r.customerName}
@@ -855,7 +871,8 @@ export function CustomersPage({
                         {r.recordedByName}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -865,10 +882,10 @@ export function CustomersPage({
 
       {/* Modal Tambah / Edit Pelanggan */}
       {showCustomerModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4">
           <form
             onSubmit={handleSaveCustomer}
-            className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-5 space-y-4"
+            className="bg-white border border-slate-200 rounded-xl max-w-md w-full max-h-[90dvh] overflow-y-auto p-5 space-y-4"
           >
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <h3 className="font-display font-semibold text-base text-slate-900">
@@ -986,10 +1003,10 @@ export function CustomersPage({
 
       {/* Modal Bayar / Cicil Piutang */}
       {payingCustomer && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4">
           <form
             onSubmit={handleRecordPayment}
-            className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-5 space-y-4"
+            className="bg-white border border-slate-200 rounded-xl max-w-md w-full max-h-[90dvh] overflow-y-auto p-5 space-y-4"
           >
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
@@ -1124,10 +1141,10 @@ export function CustomersPage({
 
       {/* Modal Tambah Kasbon Manual */}
       {debtCustomer && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4">
           <form
             onSubmit={handleRecordManualDebt}
-            className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-5 space-y-4"
+            className="bg-white border border-slate-200 rounded-xl max-w-md w-full max-h-[90dvh] overflow-y-auto p-5 space-y-4"
           >
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>

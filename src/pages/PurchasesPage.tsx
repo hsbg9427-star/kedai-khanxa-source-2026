@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
   AlertCircle,
+  Bell,
   Building2,
   Calendar,
   CheckCircle2,
@@ -67,10 +68,15 @@ import {
 } from '../utils/purchaseCalculations';
 import type { ReportPeriodType } from '../utils/qrisFee';
 import {
+  calculateDaysRemaining,
+  collectExpiryAlerts,
   computeEstimatedExpiryDate,
   evaluateBatchExpiry,
   EXPIRY_ESTIMATE_DISCLAIMER,
+  formatDaysRemainingLabel,
   formatShortIdDate,
+  getEffectiveExpiryDate,
+  getExpiryStatus,
 } from '../utils/expiryUtils';
 import {
   computeBaseQuantityFromUnit,
@@ -98,6 +104,7 @@ interface FormLineRow {
   unitCost: string;
   lineDiscount: string;
   actualExpiryDate: string;
+  sellPrice: string;
 }
 
 const PERIOD_OPTIONS: { id: ReportPeriodType; label: string }[] = [
@@ -116,6 +123,7 @@ function createEmptyLine(): FormLineRow {
     unitCost: '',
     lineDiscount: '0',
     actualExpiryDate: '',
+    sellPrice: '',
   };
 }
 
@@ -386,6 +394,19 @@ export function PurchasesPage({
     [purchases]
   );
 
+  const expiryAlerts = useMemo(
+    () => collectExpiryAlerts(products, stockBatches),
+    [products, stockBatches]
+  );
+  const expiredAlertCount = useMemo(
+    () => expiryAlerts.filter((a) => a.expiryStatus === 'EXPIRED').length,
+    [expiryAlerts]
+  );
+  const nearExpiryAlertCount = useMemo(
+    () => expiryAlerts.filter((a) => a.expiryStatus === 'MENDEKATI EXPIRED').length,
+    [expiryAlerts]
+  );
+
   const filteredPeriodPurchases = useMemo(() => {
     const q = historySearch.trim().toLowerCase();
     if (!q) return report.periodPurchases;
@@ -415,22 +436,26 @@ export function PurchasesPage({
       prev.map((row) => {
         if (row.rowId !== rowId) return row;
         if (!prod) {
-          return { ...row, productId: '', unitName: '', unitCost: '', actualExpiryDate: '' };
+          return { ...row, productId: '', unitName: '', unitCost: '', actualExpiryDate: '', sellPrice: '' };
         }
         const buyOptions = getProductBuyOptions(prod);
         const defaultOpt = buyOptions[0];
         const defaultUnitName = defaultOpt?.unitName || prod.unit;
+        const lastHistory = priceHistory.find((ph) => ph.productId === prod.id);
         const suggestedCost =
-          defaultOpt?.buyPrice !== undefined && defaultOpt.buyPrice > 0
-            ? roundMoney(defaultOpt.buyPrice)
-            : prod.costPrice > 0 && defaultOpt
-              ? roundMoney(prod.costPrice * defaultOpt.conversion)
-              : 0;
+          lastHistory?.costPriceAfter !== undefined && lastHistory.costPriceAfter >= 0
+            ? roundMoney(lastHistory.costPriceAfter)
+            : defaultOpt?.buyPrice !== undefined && defaultOpt.buyPrice > 0
+              ? roundMoney(defaultOpt.buyPrice)
+              : prod.costPrice > 0 && defaultOpt
+                ? roundMoney(prod.costPrice * defaultOpt.conversion)
+                : prod.costPrice;
         return {
           ...row,
           productId: prod.id,
           unitName: defaultUnitName,
           unitCost: suggestedCost > 0 ? String(suggestedCost) : '',
+          sellPrice: String(prod.sellPrice || 0),
           actualExpiryDate: '',
         };
       })
@@ -506,6 +531,7 @@ export function PurchasesPage({
         unitCost: r.unitCost === '' ? -1 : Number(r.unitCost),
         lineDiscount: Number(r.lineDiscount) || 0,
         actualExpiryDate: r.actualExpiryDate || undefined,
+        sellPrice: r.sellPrice === '' ? undefined : Number(r.sellPrice),
       });
     }
 
@@ -972,6 +998,38 @@ export function PurchasesPage({
         </div>
       </div>
 
+      {expiryAlerts.length > 0 && (
+        <div
+          className={`rounded-xl p-4 border flex items-start gap-2.5 text-xs sm:text-sm ${
+            expiredAlertCount > 0
+              ? 'bg-red-50 border-red-200 text-red-900'
+              : 'bg-amber-50 border-amber-200 text-amber-900'
+          }`}
+        >
+          <Bell
+            className={`w-4 h-4 shrink-0 mt-0.5 ${
+              expiredAlertCount > 0 ? 'text-red-700' : 'text-amber-700'
+            }`}
+          />
+          <div>
+            <strong>Pemberitahuan Expired ({expiryAlerts.length} item):</strong>{' '}
+            <span>
+              {expiredAlertCount > 0 ? `${expiredAlertCount} EXPIRED` : ''}
+              {expiredAlertCount > 0 && nearExpiryAlertCount > 0 ? ' · ' : ''}
+              {nearExpiryAlertCount > 0
+                ? `${nearExpiryAlertCount} mendekati expired (≤ 1 bulan / 30 hari)`
+                : ''}
+              {' — '}
+              {expiryAlerts
+                .slice(0, 3)
+                .map((a) => `${a.productName} (ED ${formatShortIdDate(a.effectiveExpiryDate)})`)
+                .join(', ')}
+              {expiryAlerts.length > 3 ? `, +${expiryAlerts.length - 3} lainnya` : ''}.
+            </span>
+          </div>
+        </div>
+      )}
+
       {feedback && (
         <div
           className={`rounded-xl p-4 border text-sm flex items-start gap-3 ${
@@ -1144,7 +1202,7 @@ export function PurchasesPage({
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                      <div className="md:col-span-4">
+                      <div className="md:col-span-3">
                         <label className="block text-[11px] font-semibold text-slate-600 mb-1">
                           Produk
                         </label>
@@ -1210,8 +1268,13 @@ export function PurchasesPage({
                       </div>
 
                       <div className="md:col-span-2">
-                        <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                          Harga Beli / {activeOption?.unitName || row.unitName || 'Satuan'}
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-1 flex items-center justify-between">
+                          <span>Harga Beli (Terakhir)</span>
+                          {selectedProd && (
+                            <span className="text-[10px] text-emerald-800 font-bold truncate max-w-[120px]" title={selectedProd.name}>
+                              {selectedProd.name}
+                            </span>
+                          )}
                         </label>
                         <input
                           type="number"
@@ -1229,7 +1292,24 @@ export function PurchasesPage({
 
                       <div className="md:col-span-2">
                         <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                          Diskon Item (Rp)
+                          Harga Jual Baru (Rp)
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          value={row.sellPrice}
+                          onChange={(e) =>
+                            handleUpdateRow(row.rowId, { sellPrice: e.target.value })
+                          }
+                          placeholder={selectedProd ? String(selectedProd.sellPrice) : '0'}
+                          className="w-full min-h-[42px] px-3 py-2 rounded-lg border border-slate-300 bg-white font-mono-num text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                        />
+                      </div>
+
+                      <div className="md:col-span-1">
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                          Diskon
                         </label>
                         <input
                           type="number"
@@ -1292,38 +1372,62 @@ export function PurchasesPage({
                           </div>
                         </div>
 
-                        <div className="p-3 rounded-lg bg-white border border-slate-200 space-y-2">
-                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                            <span className="font-semibold text-slate-800 inline-flex items-center gap-1.5">
-                              <Calendar className="w-3.5 h-3.5 text-emerald-700" />
-                              <span>Masa Kedaluwarsa Batch (+6 Bulan Otomatis)</span>
-                            </span>
-                            <span className="font-mono-num text-slate-600">
-                              Tgl Pembelian: <strong>{formatShortIdDate(purchaseDate)}</strong> → Perkiraan +6 Bln:{' '}
-                              <strong className="text-emerald-800">
-                                {formatShortIdDate(computeEstimatedExpiryDate(purchaseDate))}
-                              </strong>
-                            </span>
-                          </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
-                            <div className="sm:col-span-5 flex items-center gap-2">
-                              <label className="text-[11px] font-medium text-slate-600 whitespace-nowrap">
-                                ED Aktual Kemasan (Opsional):
-                              </label>
-                              <input
-                                type="date"
-                                value={row.actualExpiryDate}
-                                onChange={(e) =>
-                                  handleUpdateRow(row.rowId, { actualExpiryDate: e.target.value })
-                                }
-                                className="flex-1 min-h-[36px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                              />
+                        {(() => {
+                          const estExp = computeEstimatedExpiryDate(purchaseDate);
+                          const effExp = getEffectiveExpiryDate(
+                            estExp,
+                            row.actualExpiryDate || undefined
+                          );
+                          const expStatus = getExpiryStatus(effExp);
+                          const daysRem = calculateDaysRemaining(effExp);
+                          return (
+                            <div className="p-3 rounded-lg bg-white border border-slate-200 space-y-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                <span className="font-semibold text-slate-800 inline-flex items-center gap-1.5">
+                                  <Calendar className="w-3.5 h-3.5 text-emerald-700" />
+                                  <span>Masa Kedaluwarsa Batch (+6 Bulan Otomatis)</span>
+                                </span>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono-num text-slate-600">
+                                    Tgl Pembelian: <strong>{formatShortIdDate(purchaseDate)}</strong> → ED +6 Bln:{' '}
+                                    <strong className="text-emerald-800">
+                                      {formatShortIdDate(estExp)}
+                                    </strong>
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded font-mono-num text-[10px] font-bold ${
+                                      expStatus === 'EXPIRED'
+                                        ? 'bg-red-100 text-red-800'
+                                        : expStatus === 'MENDEKATI EXPIRED'
+                                          ? 'bg-amber-100 text-amber-900'
+                                          : 'bg-emerald-100 text-emerald-800'
+                                    }`}
+                                  >
+                                    {expStatus} ({formatDaysRemainingLabel(daysRem)})
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                                <div className="sm:col-span-5 flex items-center gap-2">
+                                  <label className="text-[11px] font-medium text-slate-600 whitespace-nowrap">
+                                    ED Aktual Kemasan (Opsional):
+                                  </label>
+                                  <input
+                                    type="date"
+                                    value={row.actualExpiryDate}
+                                    onChange={(e) =>
+                                      handleUpdateRow(row.rowId, { actualExpiryDate: e.target.value })
+                                    }
+                                    className="flex-1 min-h-[36px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                                  />
+                                </div>
+                                <div className="sm:col-span-7 text-[10px] text-slate-500">
+                                  Pemberitahuan otomatis aktif <strong>1 bulan (30 hari)</strong> sebelum expired ({formatShortIdDate(effExp)}). {EXPIRY_ESTIMATE_DISCLAIMER}
+                                </div>
+                              </div>
                             </div>
-                            <div className="sm:col-span-7 text-[10px] text-slate-500">
-                              {EXPIRY_ESTIMATE_DISCLAIMER}
-                            </div>
-                          </div>
-                        </div>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>

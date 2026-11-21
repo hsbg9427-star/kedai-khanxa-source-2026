@@ -19,6 +19,7 @@ import {
   History,
   Layers,
   Calendar,
+  Bell,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
@@ -65,9 +66,15 @@ import {
   type ImportedProductRow,
 } from '../utils/excelProducts';
 import {
+  calculateDaysRemaining,
+  collectExpiryAlerts,
   computeEstimatedExpiryDate,
   EXPIRY_ESTIMATE_DISCLAIMER,
+  formatDaysRemainingLabel,
   formatShortIdDate,
+  getEffectiveExpiryDate,
+  getExpiryStatus,
+  resolveProductExpiryDates,
   summarizeProductBatches,
   type ProductBatchSummary,
 } from '../utils/expiryUtils';
@@ -138,6 +145,7 @@ export function ProductsPage({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>('all');
   const [onlyLowStock, setOnlyLowStock] = useState(false);
+  const [onlyExpiryAlert, setOnlyExpiryAlert] = useState(false);
 
   const [movements, setMovements] = useState<StockMovement[]>([]);
   const [movementsLoading, setMovementsLoading] = useState(false);
@@ -350,6 +358,9 @@ export function ProductsPage({
     );
     setStock(String(p.stock));
     setMinStock(String(p.minStock));
+    const resolvedExp = resolveProductExpiryDates(p);
+    setInitialExpiryStartDate(resolvedExp.inputDate);
+    setInitialActualExpiryDate(resolvedExp.isCustomExpiry ? resolvedExp.effectiveExpiryDate : '');
     setIsActive(p.isActive);
     setPhotoDataUrl(p.photoDataUrl || '');
     setFeedback(null);
@@ -637,6 +648,13 @@ export function ProductsPage({
 
     try {
       if (editingProduct) {
+        const initialBatchToSync =
+          stockBatches.find(
+            (b) =>
+              b.productId === editingProduct.id &&
+              b.sourceType === 'initial_product' &&
+              b.status === 'active'
+          ) || null;
         await updateProductDetails(
           editingProduct,
           {
@@ -657,15 +675,20 @@ export function ProductsPage({
             wholesaleMinQty: numWholesaleMin,
             sellUnits: parsedSellUnits,
             minStock: numMinStock,
+            inputDate: initialExpiryStartDate,
+            expiryDate: initialActualExpiryDate || undefined,
+            initialExpiryStartDate,
+            initialActualExpiryDate: initialActualExpiryDate || undefined,
             isActive,
           },
           activeUserMeta,
-          products
+          products,
+          initialBatchToSync
         );
         setFeedback({
           kind: 'ok',
           text: isOnline
-            ? `Produk "${name}" berhasil diperbarui (riwayat harga & satuan tercatat jika berubah).`
+            ? `Produk "${name}" berhasil diperbarui (riwayat harga & masa kedaluwarsa tersimpan).`
             : `Perubahan "${name}" disimpan lokal (offline) dan akan tersinkron otomatis.`,
         });
       } else {
@@ -926,6 +949,23 @@ export function ProductsPage({
     return map;
   }, [products, stockBatches]);
 
+  const expiryAlerts = React.useMemo(
+    () => collectExpiryAlerts(products, stockBatches),
+    [products, stockBatches]
+  );
+  const alertProductIds = React.useMemo(
+    () => new Set(expiryAlerts.map((a) => a.productId)),
+    [expiryAlerts]
+  );
+  const expiredAlertCount = React.useMemo(
+    () => expiryAlerts.filter((a) => a.expiryStatus === 'EXPIRED').length,
+    [expiryAlerts]
+  );
+  const nearExpiryAlertCount = React.useMemo(
+    () => expiryAlerts.filter((a) => a.expiryStatus === 'MENDEKATI EXPIRED').length,
+    [expiryAlerts]
+  );
+
   const liveDuplicateCheck = React.useMemo(() => {
     if (!showProductModal) return null;
     if (!name.trim() && !barcode.trim()) return null;
@@ -946,6 +986,7 @@ export function ProductsPage({
   const filteredProducts = products.filter((p) => {
     if (selectedCategoryId !== 'all' && p.categoryId !== selectedCategoryId) return false;
     if (onlyLowStock && p.stock > p.minStock) return false;
+    if (onlyExpiryAlert && !alertProductIds.has(p.id)) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       const hitName = p.name.toLowerCase().includes(q);
@@ -965,6 +1006,12 @@ export function ProductsPage({
   const formWholesaleNum = wholesalePrice.trim() !== '' ? Math.max(0, Number(wholesalePrice) || 0) : null;
   const formWholesaleMargin = formWholesaleNum !== null ? formWholesaleNum - formCostNum : null;
   const estimatedInitialExpiry = computeEstimatedExpiryDate(initialExpiryStartDate);
+  const effectiveInitialExpiry = getEffectiveExpiryDate(
+    estimatedInitialExpiry,
+    initialActualExpiryDate || undefined
+  );
+  const initialExpiryStatus = getExpiryStatus(effectiveInitialExpiry);
+  const initialDaysRemaining = calculateDaysRemaining(effectiveInitialExpiry);
 
   if (!isAdmin) {
     return (
@@ -1071,6 +1118,57 @@ export function ProductsPage({
         </div>
       )}
 
+      {/* Peringatan Masa Expired (<= 1 Bulan / Sudah Expired) */}
+      {expiryAlerts.length > 0 && (
+        <div
+          className={`rounded-xl p-4 border flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${
+            expiredAlertCount > 0
+              ? 'bg-red-50 border-red-200 text-red-900'
+              : 'bg-amber-50 border-amber-200 text-amber-900'
+          }`}
+        >
+          <div className="flex items-start gap-2.5 text-sm">
+            <Bell
+              className={`w-5 h-5 shrink-0 mt-0.5 ${
+                expiredAlertCount > 0 ? 'text-red-700' : 'text-amber-700'
+              }`}
+            />
+            <div>
+              <strong>
+                Pemberitahuan Expired ({alertProductIds.size} produk):
+              </strong>{' '}
+              <span>
+                {expiredAlertCount > 0 ? `${expiredAlertCount} sudah EXPIRED` : ''}
+                {expiredAlertCount > 0 && nearExpiryAlertCount > 0 ? ' · ' : ''}
+                {nearExpiryAlertCount > 0
+                  ? `${nearExpiryAlertCount} mendekati expired (≤ 1 bulan / 30 hari)`
+                  : ''}
+                {' — '}
+                {expiryAlerts
+                  .slice(0, 3)
+                  .map((a) => `${a.productName} (${formatShortIdDate(a.effectiveExpiryDate)})`)
+                  .join(', ')}
+                {expiryAlerts.length > 3 ? `, dan ${expiryAlerts.length - 3} lainnya` : ''}
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSubTab('catalog');
+              setOnlyExpiryAlert((prev) => !prev);
+            }}
+            className={`min-h-[38px] px-3.5 py-1.5 rounded-lg bg-white border text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer ${
+              expiredAlertCount > 0
+                ? 'border-red-300 text-red-900 hover:bg-red-100'
+                : 'border-amber-300 text-amber-900 hover:bg-amber-100'
+            }`}
+          >
+            {onlyExpiryAlert ? 'Tampilkan Semua' : 'Filter Produk ED'}
+          </button>
+        </div>
+      )}
+
       {feedback && (
         <div
           className={`p-4 rounded-xl border text-sm ${
@@ -1168,7 +1266,7 @@ export function ProductsPage({
         <div className="space-y-4">
           {/* Toolbar Pencarian & Filter */}
           <div className="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-12 gap-3">
-            <div className="sm:col-span-6 flex gap-2">
+            <div className="sm:col-span-5 flex gap-2">
               <div className="relative flex-1">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
@@ -1190,7 +1288,7 @@ export function ProductsPage({
               </button>
             </div>
 
-            <div className="sm:col-span-4">
+            <div className="sm:col-span-3">
               <select
                 value={selectedCategoryId}
                 onChange={(e) => setSelectedCategoryId(e.target.value)}
@@ -1217,6 +1315,20 @@ export function ProductsPage({
                 }`}
               >
                 Stok Menipis
+              </button>
+            </div>
+
+            <div className="sm:col-span-2 flex items-center">
+              <button
+                type="button"
+                onClick={() => setOnlyExpiryAlert((prev) => !prev)}
+                className={`w-full min-h-[44px] px-3 py-2 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  onlyExpiryAlert
+                    ? 'bg-red-100 border-red-300 text-red-900'
+                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                ED ≤ 1 Bln ({alertProductIds.size})
               </button>
             </div>
           </div>
@@ -1281,6 +1393,9 @@ export function ProductsPage({
                                 : '';
                         const bSummary = batchSummaryByProductId.get(p.id);
                         const batchCount = bSummary?.allBatchesEvaluated.filter((b) => b.status === 'active' && b.remainingBaseQty > 0.0001).length || 0;
+                        const prodExp = resolveProductExpiryDates(p);
+                        const prodExpStatus = getExpiryStatus(prodExp.effectiveExpiryDate);
+                        const prodDays = calculateDaysRemaining(prodExp.effectiveExpiryDate);
                         return (
                           <tr key={p.id} className="hover:bg-slate-50 align-top">
                             <td className="py-3 px-4">
@@ -1311,7 +1426,7 @@ export function ProductsPage({
                                       {[p.brand, p.variant].filter(Boolean).join(' · ')}
                                     </div>
                                   )}
-                                  {bSummary && (bSummary.hasExpiredStock || bSummary.hasNearExpiry || batchCount > 0) && (
+                                  {bSummary && (bSummary.hasExpiredStock || bSummary.hasNearExpiry || batchCount > 0) ? (
                                     <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                                       {bSummary.hasExpiredStock && (
                                         <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-bold">
@@ -1328,6 +1443,22 @@ export function ProductsPage({
                                           {batchCount} batch · ED terdekat {formatShortIdDate(bSummary.nearestNonExpired.effectiveExpiryDate)}
                                         </span>
                                       )}
+                                    </div>
+                                  ) : prodExp.hasExplicitDates && (
+                                    <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                                      {prodExpStatus === 'EXPIRED' && (
+                                        <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-bold">
+                                          EXPIRED ({formatDaysRemainingLabel(prodDays)})
+                                        </span>
+                                      )}
+                                      {prodExpStatus === 'MENDEKATI EXPIRED' && (
+                                        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                                          MENDEKATI EXPIRED · {formatDaysRemainingLabel(prodDays)}
+                                        </span>
+                                      )}
+                                      <span className="text-[10px] font-mono-num text-slate-500">
+                                        Input {formatShortIdDate(prodExp.inputDate)} · ED {formatShortIdDate(prodExp.effectiveExpiryDate)}
+                                      </span>
                                     </div>
                                   )}
                                   <div className="text-xs text-slate-500">
@@ -1493,6 +1624,9 @@ export function ProductsPage({
                     const stockSummary = formatProductStockSummary(p.stock, p);
                     const bSummary = batchSummaryByProductId.get(p.id);
                     const batchCount = bSummary?.allBatchesEvaluated.filter((b) => b.status === 'active' && b.remainingBaseQty > 0.0001).length || 0;
+                    const prodExp = resolveProductExpiryDates(p);
+                    const prodExpStatus = getExpiryStatus(prodExp.effectiveExpiryDate);
+                    const prodDays = calculateDaysRemaining(prodExp.effectiveExpiryDate);
                     return (
                       <div key={p.id} className="p-4 space-y-2.5">
                         <div className="flex items-start gap-3">
@@ -1529,7 +1663,7 @@ export function ProductsPage({
                                 Barcode: {p.barcode}
                               </div>
                             )}
-                            {bSummary && (bSummary.hasExpiredStock || bSummary.hasNearExpiry || batchCount > 0) && (
+                            {bSummary && (bSummary.hasExpiredStock || bSummary.hasNearExpiry || batchCount > 0) ? (
                               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                                 {bSummary.hasExpiredStock && (
                                   <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-bold">
@@ -1546,6 +1680,22 @@ export function ProductsPage({
                                     {batchCount} batch · ED {formatShortIdDate(bSummary.nearestNonExpired.effectiveExpiryDate)}
                                   </span>
                                 )}
+                              </div>
+                            ) : prodExp.hasExplicitDates && (
+                              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                {prodExpStatus === 'EXPIRED' && (
+                                  <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-bold">
+                                    EXPIRED
+                                  </span>
+                                )}
+                                {prodExpStatus === 'MENDEKATI EXPIRED' && (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                                    MENDEKATI EXPIRED · {formatDaysRemainingLabel(prodDays)}
+                                  </span>
+                                )}
+                                <span className="text-[10px] font-mono-num text-slate-500">
+                                  Input {formatShortIdDate(prodExp.inputDate)} · ED {formatShortIdDate(prodExp.effectiveExpiryDate)}
+                                </span>
                               </div>
                             )}
                           </div>
@@ -2096,7 +2246,7 @@ export function ProductsPage({
                     required
                     maxLength={40}
                     value={sku}
-                    onChange={(e) => setSku(e.target.value)}
+                    onChange={(e) => setSku(e.target.value.toUpperCase())}
                     className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
@@ -2112,7 +2262,7 @@ export function ProductsPage({
                       maxLength={64}
                       value={barcode}
                       onChange={(e) => {
-                        setBarcode(e.target.value);
+                        setBarcode(e.target.value.toUpperCase());
                         setDuplicateConflict(null);
                       }}
                       placeholder="Scan atau ketik barcode"
@@ -2140,7 +2290,7 @@ export function ProductsPage({
                     maxLength={120}
                     value={name}
                     onChange={(e) => {
-                      setName(e.target.value);
+                      setName(e.target.value.toUpperCase());
                       setDuplicateConflict(null);
                     }}
                     placeholder="Contoh: Mi Instan Goreng"
@@ -2177,7 +2327,7 @@ export function ProductsPage({
                     maxLength={60}
                     value={brand}
                     onChange={(e) => {
-                      setBrand(e.target.value);
+                      setBrand(e.target.value.toUpperCase());
                       setDuplicateConflict(null);
                     }}
                     placeholder="Contoh: Indomie / Kapal Api / Aqua"
@@ -2195,7 +2345,7 @@ export function ProductsPage({
                     maxLength={80}
                     value={variant}
                     onChange={(e) => {
-                      setVariant(e.target.value);
+                      setVariant(e.target.value.toUpperCase());
                       setDuplicateConflict(null);
                     }}
                     placeholder="Contoh: 85gr / 600ml / Rasa Soto / Jumbo"
@@ -2434,51 +2584,62 @@ export function ProductsPage({
                   </div>
                 </div>
 
-                {!editingProduct && Number(stock) > 0 && (
-                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
                       <Calendar className="w-4 h-4 text-emerald-700 shrink-0" />
-                      <span>Pengelolaan Tanggal Kedaluwarsa Batch Stok Awal (+6 Bulan Otomatis)</span>
+                      <span>Tanggal Input &amp; Expired Otomatis (+6 Bulan)</span>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-                      <div className="space-y-1">
-                        <label htmlFor="prd-exp-start" className="block text-[11px] font-medium text-slate-600">
-                          Tanggal Awal Input Stok
-                        </label>
-                        <input
-                          id="prd-exp-start"
-                          type="date"
-                          value={initialExpiryStartDate}
-                          onChange={(e) => setInitialExpiryStartDate(e.target.value)}
-                          className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <div className="text-[11px] font-medium text-slate-600">
-                          Perkiraan Kedaluwarsa (+6 Bln)
-                        </div>
-                        <div className="min-h-[40px] px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-mono-num font-semibold text-slate-800 flex items-center">
-                          {formatShortIdDate(estimatedInitialExpiry)} ({estimatedInitialExpiry})
-                        </div>
-                      </div>
-                      <div className="space-y-1">
-                        <label htmlFor="prd-exp-actual" className="block text-[11px] font-medium text-slate-600">
-                          ED Aktual Kemasan (Opsional, Diutamakan)
-                        </label>
-                        <input
-                          id="prd-exp-actual"
-                          type="date"
-                          value={initialActualExpiryDate}
-                          onChange={(e) => setInitialActualExpiryDate(e.target.value)}
-                          className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                        />
-                      </div>
-                    </div>
-                    <p className="text-[11px] text-slate-500">
-                      {EXPIRY_ESTIMATE_DISCLAIMER}
-                    </p>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[11px] font-bold font-mono-num ${
+                        initialExpiryStatus === 'EXPIRED'
+                          ? 'bg-red-100 text-red-800'
+                          : initialExpiryStatus === 'MENDEKATI EXPIRED'
+                            ? 'bg-amber-100 text-amber-900'
+                            : 'bg-emerald-100 text-emerald-800'
+                      }`}
+                    >
+                      {initialExpiryStatus} ({formatDaysRemainingLabel(initialDaysRemaining)})
+                    </span>
                   </div>
-                )}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                    <div className="space-y-1">
+                      <label htmlFor="prd-exp-start" className="block text-[11px] font-medium text-slate-600">
+                        Tanggal Input Produk / Stok
+                      </label>
+                      <input
+                        id="prd-exp-start"
+                        type="date"
+                        value={initialExpiryStartDate}
+                        onChange={(e) => setInitialExpiryStartDate(e.target.value)}
+                        className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-[11px] font-medium text-slate-600">
+                        Expired Otomatis (+6 Bln)
+                      </div>
+                      <div className="min-h-[40px] px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-mono-num font-semibold text-slate-800 flex items-center">
+                        {formatShortIdDate(estimatedInitialExpiry)} ({estimatedInitialExpiry})
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label htmlFor="prd-exp-actual" className="block text-[11px] font-medium text-slate-600">
+                        ED Aktual Kemasan (Opsional, Diutamakan)
+                      </label>
+                      <input
+                        id="prd-exp-actual"
+                        type="date"
+                        value={initialActualExpiryDate}
+                        onChange={(e) => setInitialActualExpiryDate(e.target.value)}
+                        className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono-num bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-slate-600">
+                    Pemberitahuan otomatis aktif mulai <strong>1 bulan (30 hari)</strong> sebelum tanggal expired (<strong>{formatShortIdDate(effectiveInitialExpiry)}</strong>). {EXPIRY_ESTIMATE_DISCLAIMER}
+                  </p>
+                </div>
               </div>
 
               {/* Satuan Tambahan (Multi-Satuan Universal Pembelian & Penjualan) */}
@@ -2868,8 +3029,8 @@ export function ProductsPage({
 
       {/* MODAL PENYESUAIAN STOK */}
       {adjustTarget && (
-        <div className="fixed inset-0 z-40 bg-slate-900/60 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full overflow-hidden">
+        <div className="fixed inset-0 z-40 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full max-h-[90dvh] overflow-y-auto">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="font-display font-semibold text-base text-slate-900">
                 Penyesuaian Stok Produk
@@ -2974,45 +3135,68 @@ export function ProductsPage({
                 </div>
               </div>
 
-              {adjustMode === 'in' && (
-                <div className="p-3.5 rounded-lg bg-emerald-50/60 border border-emerald-200 space-y-2.5">
-                  <div className="text-xs font-semibold text-emerald-900 flex items-center gap-1.5">
-                    <Calendar className="w-4 h-4 text-emerald-700" />
-                    <span>Batch Baru &amp; Perkiraan Kedaluwarsa (+6 Bulan)</span>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <div className="space-y-1">
-                      <label htmlFor="adj-start-date" className="block text-[11px] font-medium text-slate-700">
-                        Tanggal Input Stok
-                      </label>
-                      <input
-                        id="adj-start-date"
-                        type="date"
-                        value={adjustStartDate}
-                        onChange={(e) => setAdjustStartDate(e.target.value)}
-                        className="w-full min-h-[38px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white"
-                      />
+              {adjustMode === 'in' && (() => {
+                const estAdjustExp = computeEstimatedExpiryDate(adjustStartDate);
+                const effAdjustExp = getEffectiveExpiryDate(
+                  estAdjustExp,
+                  adjustActualExpiryDate || undefined
+                );
+                const adjExpStatus = getExpiryStatus(effAdjustExp);
+                const adjDays = calculateDaysRemaining(effAdjustExp);
+                return (
+                  <div className="p-3.5 rounded-lg bg-emerald-50/60 border border-emerald-200 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-emerald-900 flex items-center gap-1.5">
+                        <Calendar className="w-4 h-4 text-emerald-700" />
+                        <span>Batch Baru &amp; Expired Otomatis (+6 Bulan)</span>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono-num ${
+                          adjExpStatus === 'EXPIRED'
+                            ? 'bg-red-100 text-red-800'
+                            : adjExpStatus === 'MENDEKATI EXPIRED'
+                              ? 'bg-amber-100 text-amber-900'
+                              : 'bg-emerald-100 text-emerald-800'
+                        }`}
+                      >
+                        {adjExpStatus} ({formatDaysRemainingLabel(adjDays)})
+                      </span>
                     </div>
-                    <div className="space-y-1">
-                      <label htmlFor="adj-actual-exp" className="block text-[11px] font-medium text-slate-700">
-                        ED Aktual Kemasan (Opsional)
-                      </label>
-                      <input
-                        id="adj-actual-exp"
-                        type="date"
-                        value={adjustActualExpiryDate}
-                        onChange={(e) => setAdjustActualExpiryDate(e.target.value)}
-                        className="w-full min-h-[38px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white"
-                      />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div className="space-y-1">
+                        <label htmlFor="adj-start-date" className="block text-[11px] font-medium text-slate-700">
+                          Tanggal Input Stok
+                        </label>
+                        <input
+                          id="adj-start-date"
+                          type="date"
+                          value={adjustStartDate}
+                          onChange={(e) => setAdjustStartDate(e.target.value)}
+                          className="w-full min-h-[38px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label htmlFor="adj-actual-exp" className="block text-[11px] font-medium text-slate-700">
+                          ED Aktual Kemasan (Opsional)
+                        </label>
+                        <input
+                          id="adj-actual-exp"
+                          type="date"
+                          value={adjustActualExpiryDate}
+                          onChange={(e) => setAdjustActualExpiryDate(e.target.value)}
+                          className="w-full min-h-[38px] px-2.5 py-1 rounded-lg border border-slate-300 text-xs font-mono-num bg-white"
+                        />
+                      </div>
                     </div>
+                    <div className="text-[11px] font-mono-num text-emerald-900">
+                      Expired otomatis (+6 bulan): <strong>{formatShortIdDate(estAdjustExp)}</strong> ({estAdjustExp})
+                    </div>
+                    <p className="text-[11px] text-slate-600">
+                      Pemberitahuan otomatis aktif mulai <strong>1 bulan (30 hari)</strong> sebelum expired ({formatShortIdDate(effAdjustExp)}). {EXPIRY_ESTIMATE_DISCLAIMER}
+                    </p>
                   </div>
-                  <div className="text-[11px] font-mono-num text-emerald-900">
-                    Perkiraan +6 bulan: <strong>{formatShortIdDate(computeEstimatedExpiryDate(adjustStartDate))}</strong>{' '}
-                    ({computeEstimatedExpiryDate(adjustStartDate)})
-                  </div>
-                  <p className="text-[11px] text-slate-600">{EXPIRY_ESTIMATE_DISCLAIMER}</p>
-                </div>
-              )}
+                );
+              })()}
 
               {adjustMode === 'out' && (() => {
                 const activeBatches = (batchSummaryByProductId.get(adjustTarget.id)?.allBatchesEvaluated || []).filter(

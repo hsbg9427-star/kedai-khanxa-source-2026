@@ -419,6 +419,7 @@ export async function recordPurchaseTransaction(
     }
 
     // Items + Stock Batches + Stock Movements
+    const earliestExpiryByProduct = new Map<string, string>();
     liveDraft.lines.forEach((line, idx) => {
       const itemId = generateSafeId(`pit${idx}`);
       writer.set(doc(db, 'purchases', purchaseId, 'items', itemId), {
@@ -459,6 +460,11 @@ export async function recordPurchaseTransaction(
         user,
       });
       writer.set(doc(db, 'stock_batches', batchDoc.id), batchDoc.data);
+      const effExp = String(batchDoc.data.effectiveExpiryDate || '');
+      const prevEarliest = earliestExpiryByProduct.get(line.product.id);
+      if (effExp && (!prevEarliest || effExp < prevEarliest)) {
+        earliestExpiryByProduct.set(line.product.id, effExp);
+      }
 
       const moveId = generateSafeId(`stk${idx}`);
       const convNote =
@@ -488,14 +494,33 @@ export async function recordPurchaseTransaction(
 
     // Update each distinct product once + log HPP change if changed
     liveDraft.productUpdates.forEach((upd, idx) => {
+      const purchasedExp = earliestExpiryByProduct.get(upd.product.id);
+      const shouldSyncProductExpiry =
+        Boolean(purchasedExp) && (!upd.product.expiryDate || Number(upd.product.stock) <= 0.0001);
+      const hasNewSell = upd.newSellPrice !== undefined && upd.newSellPrice >= 0;
+      const finalSellPrice = hasNewSell ? upd.newSellPrice! : roundMoney(Math.max(0, Number(upd.product.sellPrice) || 0));
+      const sellPriceBefore = roundMoney(Math.max(0, Number(upd.product.sellPrice) || 0));
+      const sellPriceChanged = hasNewSell && Math.abs(finalSellPrice - sellPriceBefore) >= 0.0001;
+
       writer.update(doc(db, 'products', upd.product.id), {
         stock: upd.stockAfter,
         costPrice: upd.hppAfter,
+        ...(hasNewSell ? { sellPrice: finalSellPrice } : {}),
+        ...(shouldSyncProductExpiry
+          ? { inputDate: input.purchaseDate, expiryDate: purchasedExp }
+          : {}),
         updatedAt: serverTimestamp(),
       });
 
-      if (upd.hppChanged) {
+      if (upd.hppChanged || sellPriceChanged) {
         const priceId = generateSafeId(`prc${idx}`);
+        const changesText = [
+          upd.hppChanged ? `HPP: ${formatRupiah(upd.hppBefore)} → ${formatRupiah(upd.hppAfter)}` : '',
+          sellPriceChanged ? `Harga Jual: ${formatRupiah(sellPriceBefore)} → ${formatRupiah(finalSellPrice)}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+
         writer.set(doc(db, 'price_history', priceId), {
           ...meta,
           transactionNumber: `HPP-${meta.transactionNumber.slice(4)}-${idx + 1}`.slice(0, 40),
@@ -505,17 +530,15 @@ export async function recordPurchaseTransaction(
           changeType: 'update',
           costPriceBefore: upd.hppBefore,
           costPriceAfter: upd.hppAfter,
-          sellPriceBefore: roundMoney(Math.max(0, Number(upd.product.sellPrice) || 0)),
-          sellPriceAfter: roundMoney(Math.max(0, Number(upd.product.sellPrice) || 0)),
+          sellPriceBefore,
+          sellPriceAfter: finalSellPrice,
           ...(upd.product.wholesalePrice !== undefined
             ? {
                 wholesalePriceBefore: roundMoney(Math.max(0, Number(upd.product.wholesalePrice) || 0)),
                 wholesalePriceAfter: roundMoney(Math.max(0, Number(upd.product.wholesalePrice) || 0)),
               }
             : {}),
-          summary: `HPP rata-rata tertimbang (Pembelian ${meta.transactionNumber}): ${formatRupiah(
-            upd.hppBefore
-          )} → ${formatRupiah(upd.hppAfter)}/${upd.product.unit}`.slice(0, 300),
+          summary: `Pembaruan dari Pembelian ${meta.transactionNumber}: ${changesText}`.slice(0, 300),
           createdAt: serverTimestamp(),
         });
       }

@@ -9,6 +9,7 @@ import {
   History,
   FileBarChart2,
   AlertCircle,
+  Pencil,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
@@ -18,6 +19,7 @@ import {
   recordLoanInstallment,
   subscribeLoanPayments,
   subscribeLoans,
+  updateLoanAdminFeeAgreement,
 } from '../services/loanService';
 import {
   formatIndonesianDate,
@@ -26,7 +28,12 @@ import {
   getTodayDateString,
 } from '../utils/formatters';
 import { getReadableFirestoreError } from '../utils/firestoreError';
-import { getLoanDisplayStatus, type LoanDisplayStatus } from '../utils/qrisFee';
+import {
+  getLoanAdminFeeState,
+  getLoanDisplayStatus,
+  getLoanPaymentBreakdown,
+  type LoanDisplayStatus,
+} from '../utils/qrisFee';
 import { roundMoney } from '../utils/unitConversion';
 
 interface LoansPageProps {
@@ -34,7 +41,14 @@ interface LoansPageProps {
 }
 
 type LoanTab = 'loans' | 'payments' | 'summary';
-type StatusFilter = 'all' | 'active' | 'Belum Bayar' | 'Cicilan' | 'Terlambat' | 'Lunas';
+type StatusFilter =
+  | 'all'
+  | 'active'
+  | 'Belum Bayar'
+  | 'Cicilan'
+  | 'Terlambat'
+  | 'Lunas'
+  | 'awaiting_admin';
 
 function addDays(dateStr: string, days: number): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
@@ -75,18 +89,25 @@ export function LoansPage({ accounts }: LoansPageProps) {
   const [borrowerName, setBorrowerName] = useState('');
   const [borrowerPhone, setBorrowerPhone] = useState('');
   const [principalAmount, setPrincipalAmount] = useState('');
+  const [loanAdminFee, setLoanAdminFee] = useState('');
   const [loanDate, setLoanDate] = useState(getTodayDateString());
   const [dueDate, setDueDate] = useState(addDays(getTodayDateString(), 30));
   const [sourceAccountId, setSourceAccountId] = useState('');
   const [loanNotes, setLoanNotes] = useState('');
   const [savingLoan, setSavingLoan] = useState(false);
 
-  // Modal Cicilan / Pelunasan
+  // Modal Cicilan / Pelunasan / Bayar Admin Fleksibel
   const [payingLoan, setPayingLoan] = useState<Loan | null>(null);
-  const [payAmount, setPayAmount] = useState('');
+  const [payPrincipal, setPayPrincipal] = useState('');
+  const [payAdminFee, setPayAdminFee] = useState('');
   const [destAccountId, setDestAccountId] = useState('');
   const [payNotes, setPayNotes] = useState('');
   const [savingPay, setSavingPay] = useState(false);
+
+  // Edit target biaya admin fleksibel di modal pembayaran
+  const [editingTargetAdmin, setEditingTargetAdmin] = useState(false);
+  const [targetAdminDraft, setTargetAdminDraft] = useState('');
+  const [savingTargetAdmin, setSavingTargetAdmin] = useState(false);
 
   const submitLockRef = useRef(false);
 
@@ -151,15 +172,22 @@ export function LoansPage({ accounts }: LoansPageProps) {
   const totalRemaining = roundMoney(
     loans.reduce((sum, l) => sum + Math.max(0, Number(l.remainingAmount) || 0), 0)
   );
+  const totalAdminFeePaid = roundMoney(
+    loans.reduce((sum, l) => sum + Math.max(0, Number(l.adminFeePaid) || 0), 0)
+  );
+  const awaitingAdminLoans = loans.filter((l) => getLoanAdminFeeState(l).needsAdminPayment);
   const overdueLoans = loans.filter((l) => getLoanDisplayStatus(l, todayStr) === 'Terlambat');
   const activeLoansCount = loans.filter((l) => Number(l.remainingAmount) > 0).length;
 
   const filteredLoans = loans.filter((l) => {
     const displayStatus = getLoanDisplayStatus(l, todayStr);
+    const adminState = getLoanAdminFeeState(l);
     if (statusFilter === 'active' && displayStatus === 'Lunas') return false;
+    if (statusFilter === 'awaiting_admin' && !adminState.needsAdminPayment) return false;
     if (
       statusFilter !== 'all' &&
       statusFilter !== 'active' &&
+      statusFilter !== 'awaiting_admin' &&
       displayStatus !== statusFilter
     ) {
       return false;
@@ -181,6 +209,7 @@ export function LoansPage({ accounts }: LoansPageProps) {
     setBorrowerName('');
     setBorrowerPhone('');
     setPrincipalAmount('');
+    setLoanAdminFee('');
     setLoanDate(today);
     setDueDate(addDays(today, 30));
     setLoanNotes('');
@@ -203,11 +232,13 @@ export function LoansPage({ accounts }: LoansPageProps) {
     setFeedback(null);
 
     try {
+      const parsedAdminFee = roundMoney(Math.max(0, Number(loanAdminFee) || 0));
       const res = await createLoanDisbursement(
         {
           borrowerName,
           borrowerPhone,
           principalAmount: Number(principalAmount),
+          adminFee: parsedAdminFee,
           loanDate,
           dueDate,
           sourceAccount: selectedSource,
@@ -225,7 +256,7 @@ export function LoansPage({ accounts }: LoansPageProps) {
         text: isOnline
           ? `Pinjaman ${res.transactionNumber} a.n. ${borrowerName.trim()} dicatat. Saldo ${
               selectedSource.name
-            } berkurang otomatis.`
+            } berkurang ${formatRupiah(Number(principalAmount))} (biaya admin dibayar setelah pengembalian).`
           : `Pinjaman ${res.transactionNumber} disimpan lokal (offline) dan saldo langsung diperbarui.`,
       });
     } catch (error) {
@@ -240,8 +271,16 @@ export function LoansPage({ accounts }: LoansPageProps) {
   };
 
   const openPayModal = (loan: Loan) => {
+    const adminState = getLoanAdminFeeState(loan);
     setPayingLoan(loan);
-    setPayAmount(String(loan.remainingAmount));
+    setPayPrincipal(loan.remainingAmount > 0 ? String(loan.remainingAmount) : '0');
+    setPayAdminFee(
+      loan.remainingAmount <= 0 && adminState.remainingTargetAdminFee > 0
+        ? String(adminState.remainingTargetAdminFee)
+        : ''
+    );
+    setEditingTargetAdmin(false);
+    setTargetAdminDraft(adminState.targetAdminFee > 0 ? String(adminState.targetAdminFee) : '');
     setPayNotes('');
     setFeedback(null);
     const preferred =
@@ -251,25 +290,69 @@ export function LoansPage({ accounts }: LoansPageProps) {
     if (preferred) setDestAccountId(preferred.id);
   };
 
+  const handleSaveTargetAdminFee = async () => {
+    if (!payingLoan || savingTargetAdmin) return;
+    const nextTarget = roundMoney(Math.max(0, Number(targetAdminDraft) || 0));
+    setSavingTargetAdmin(true);
+    try {
+      await updateLoanAdminFeeAgreement(payingLoan.id, nextTarget);
+      setPayingLoan({ ...payingLoan, adminFee: nextTarget });
+      setEditingTargetAdmin(false);
+      if (payingLoan.remainingAmount <= 0) {
+        const remAdmin = Math.max(0, nextTarget - (Number(payingLoan.adminFeePaid) || 0));
+        if (remAdmin > 0) setPayAdminFee(String(remAdmin));
+      }
+      setFeedback({
+        kind: 'ok',
+        text:
+          nextTarget > 0
+            ? `Target biaya admin ${payingLoan.transactionNumber} diperbarui menjadi ${formatRupiah(
+                nextTarget
+              )}.`
+            : `Biaya admin ${payingLoan.transactionNumber} diatur ke mode Fleksibel.`,
+      });
+    } catch (error) {
+      setFeedback({
+        kind: 'err',
+        text: error instanceof Error ? error.message : getReadableFirestoreError(error),
+      });
+    } finally {
+      setSavingTargetAdmin(false);
+    }
+  };
+
   const handleRecordPayment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !payingLoan || submitLockRef.current) return;
 
     const destAcc = selectableAccounts.find((a) => a.id === destAccountId);
     if (!destAcc) {
-      setFeedback({ kind: 'err', text: 'Pilih kas atau rekening tujuan penerimaan cicilan.' });
+      setFeedback({ kind: 'err', text: 'Pilih kas atau rekening tujuan penerimaan.' });
       return;
     }
 
-    const numericAmount = roundMoney(Number(payAmount) || 0);
-    if (numericAmount <= 0) {
-      setFeedback({ kind: 'err', text: 'Nominal pembayaran harus lebih dari Rp0.' });
-      return;
-    }
-    if (numericAmount > payingLoan.remainingAmount) {
+    const numericPrincipal = roundMoney(Math.max(0, Number(payPrincipal) || 0));
+    const numericAdmin = roundMoney(Math.max(0, Number(payAdminFee) || 0));
+    const totalCashIn = roundMoney(numericPrincipal + numericAdmin);
+
+    if (totalCashIn <= 0) {
       setFeedback({
         kind: 'err',
-        text: `Pembayaran tidak boleh melebihi sisa pinjaman (${formatRupiah(
+        text: 'Isi minimal salah satu: nominal bayar pokok pinjaman atau biaya admin (> Rp0).',
+      });
+      return;
+    }
+    if (numericPrincipal > 0 && payingLoan.remainingAmount <= 0) {
+      setFeedback({
+        kind: 'err',
+        text: 'Pokok pinjaman sudah lunas. Kosongkan nominal pokok untuk membayar biaya admin saja.',
+      });
+      return;
+    }
+    if (numericPrincipal > payingLoan.remainingAmount) {
+      setFeedback({
+        kind: 'err',
+        text: `Pembayaran pokok tidak boleh melebihi sisa pokok pinjaman (${formatRupiah(
           payingLoan.remainingAmount
         )}).`,
       });
@@ -284,7 +367,8 @@ export function LoansPage({ accounts }: LoansPageProps) {
       const res = await recordLoanInstallment(
         {
           loan: payingLoan,
-          amount: numericAmount,
+          principalAmountPaid: numericPrincipal,
+          adminFeePaid: numericAdmin,
           destinationAccount: destAcc,
           notes: payNotes,
         },
@@ -295,11 +379,14 @@ export function LoansPage({ accounts }: LoansPageProps) {
       );
 
       setPayingLoan(null);
+      const summaryParts: string[] = [];
+      if (res.principalPaid > 0) summaryParts.push(`Pokok ${formatRupiah(res.principalPaid)}`);
+      if (res.adminFeePaid > 0) summaryParts.push(`Admin ${formatRupiah(res.adminFeePaid)}`);
       setFeedback({
         kind: 'ok',
-        text: `${res.remainingAfter === 0 ? 'Pelunasan' : 'Cicilan'} ${
-          res.transactionNumber
-        } diterima ke ${destAcc.name}. Sisa pinjaman: ${formatRupiah(res.remainingAfter)}.`,
+        text: `${res.transactionNumber} (${summaryParts.join(' + ')}) = ${formatRupiah(
+          res.totalReceived
+        )} diterima ke ${destAcc.name}. Sisa pokok: ${formatRupiah(res.remainingAfter)}.`,
       });
     } catch (error) {
       setFeedback({
@@ -311,6 +398,11 @@ export function LoansPage({ accounts }: LoansPageProps) {
       submitLockRef.current = false;
     }
   };
+
+  const modalPrincipalNum = roundMoney(Math.max(0, Number(payPrincipal) || 0));
+  const modalAdminNum = roundMoney(Math.max(0, Number(payAdminFee) || 0));
+  const modalTotalIn = roundMoney(modalPrincipalNum + modalAdminNum);
+  const payingAdminState = payingLoan ? getLoanAdminFeeState(payingLoan) : null;
 
   return (
     <div className="space-y-6">
@@ -326,8 +418,9 @@ export function LoansPage({ accounts }: LoansPageProps) {
             )}
           </div>
           <p className="text-xs text-slate-500">
-            Khusus Admin. Pokok pinjaman &amp; cicilan memengaruhi saldo kas/rekening dan piutang,
-            bukan omzet penjualan atau biaya operasional.
+            Khusus Admin. Pokok pinjaman &amp; pengembalian pokok memengaruhi kas/rekening (pos
+            non-laba), sedangkan biaya admin fleksibel dibayar setelah/saat pengembalian &amp;
+            dicatat sebagai pendapatan jasa.
           </p>
         </div>
 
@@ -354,26 +447,26 @@ export function LoansPage({ accounts }: LoansPageProps) {
       )}
 
       {/* KPI Ringkas */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
           <div className="text-xs text-slate-500">Total Pinjaman Diberikan</div>
-          <div className="font-mono-num text-xl font-bold text-slate-900">
+          <div className="font-mono-num text-lg font-bold text-slate-900">
             {formatRupiah(totalPrincipal)}
           </div>
           <div className="text-xs text-slate-500 font-mono-num">{loans.length} catatan pinjaman</div>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-          <div className="text-xs text-slate-500">Total Cicilan Diterima</div>
-          <div className="font-mono-num text-xl font-bold text-emerald-700">
+          <div className="text-xs text-slate-500">Pokok Kembali</div>
+          <div className="font-mono-num text-lg font-bold text-emerald-700">
             {formatRupiah(totalPaid)}
           </div>
           <div className="text-xs text-slate-500 font-mono-num">{payments.length} kali pembayaran</div>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-          <div className="text-xs text-slate-500">Total Piutang Belum Lunas</div>
-          <div className="font-mono-num text-xl font-bold text-amber-700">
+          <div className="text-xs text-slate-500">Sisa Piutang Pokok</div>
+          <div className="font-mono-num text-lg font-bold text-amber-700">
             {formatRupiah(totalRemaining)}
           </div>
           <div className="text-xs text-slate-500 font-mono-num">
@@ -382,9 +475,21 @@ export function LoansPage({ accounts }: LoansPageProps) {
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
-          <div className="text-xs text-slate-500">Pinjaman Jatuh Tempo / Terlambat</div>
+          <div className="text-xs text-slate-500">Biaya Admin Diterima</div>
+          <div className="font-mono-num text-lg font-bold text-emerald-700">
+            {formatRupiah(totalAdminFeePaid)}
+          </div>
+          <div className="text-xs text-slate-500 font-mono-num">
+            {awaitingAdminLoans.length > 0
+              ? `${awaitingAdminLoans.length} tunggu bayar admin`
+              : 'Fleksibel setelah pengembalian'}
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1">
+          <div className="text-xs text-slate-500">Jatuh Tempo / Terlambat</div>
           <div
-            className={`font-mono-num text-xl font-bold ${
+            className={`font-mono-num text-lg font-bold ${
               overdueLoans.length > 0 ? 'text-red-700' : 'text-slate-900'
             }`}
           >
@@ -421,7 +526,7 @@ export function LoansPage({ accounts }: LoansPageProps) {
           }`}
         >
           <History className="w-4 h-4" />
-          <span>Riwayat Cicilan &amp; Pelunasan</span>
+          <span>Riwayat Cicilan &amp; Admin</span>
         </button>
 
         <button
@@ -459,11 +564,12 @@ export function LoansPage({ accounts }: LoansPageProps) {
               className="min-h-[44px] px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
             >
               <option value="all">Semua Status</option>
-              <option value="active">Belum Lunas (Semua)</option>
+              <option value="active">Pokok Belum Lunas (Semua)</option>
               <option value="Belum Bayar">Belum Bayar</option>
               <option value="Cicilan">Cicilan</option>
               <option value="Terlambat">Terlambat</option>
-              <option value="Lunas">Lunas</option>
+              <option value="Lunas">Pokok Lunas</option>
+              <option value="awaiting_admin">Pokok Lunas · Menunggu Biaya Admin</option>
             </select>
           </div>
 
@@ -490,7 +596,8 @@ export function LoansPage({ accounts }: LoansPageProps) {
                       <th className="py-3 px-4 whitespace-nowrap">Sumber Dana</th>
                       <th className="py-3 px-4 text-right whitespace-nowrap">Pokok</th>
                       <th className="py-3 px-4 text-right whitespace-nowrap">Dibayar</th>
-                      <th className="py-3 px-4 text-right whitespace-nowrap">Sisa Pinjaman</th>
+                      <th className="py-3 px-4 text-right whitespace-nowrap">Sisa Pokok</th>
+                      <th className="py-3 px-4 text-right whitespace-nowrap">Biaya Admin</th>
                       <th className="py-3 px-4 whitespace-nowrap">Status</th>
                       <th className="py-3 px-4 text-right whitespace-nowrap">Aksi</th>
                     </tr>
@@ -498,6 +605,7 @@ export function LoansPage({ accounts }: LoansPageProps) {
                   <tbody className="divide-y divide-slate-100 text-sm">
                     {filteredLoans.map((loan) => {
                       const dispStatus = getLoanDisplayStatus(loan, todayStr);
+                      const adminState = getLoanAdminFeeState(loan);
                       return (
                         <tr key={loan.id} className="hover:bg-slate-50">
                           <td className="py-3.5 px-4">
@@ -534,14 +642,37 @@ export function LoansPage({ accounts }: LoansPageProps) {
                           <td className="py-3.5 px-4 text-right font-mono-num font-bold text-slate-900 whitespace-nowrap">
                             {formatRupiah(loan.remainingAmount)}
                           </td>
-                          <td className="py-3.5 px-4 whitespace-nowrap">
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded border text-xs font-semibold ${getStatusBadgeClass(
-                                dispStatus
-                              )}`}
+                          <td className="py-3.5 px-4 text-right font-mono-num text-xs whitespace-nowrap">
+                            <div
+                              className={
+                                adminState.paidAdminFee > 0
+                                  ? 'font-semibold text-emerald-700'
+                                  : 'text-slate-500'
+                              }
                             >
-                              {dispStatus}
-                            </span>
+                              Masuk: {formatRupiah(adminState.paidAdminFee)}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {adminState.isFlexible
+                                ? 'Mode: Fleksibel'
+                                : `Target: ${formatRupiah(adminState.targetAdminFee)}`}
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 whitespace-nowrap">
+                            <div className="flex flex-col items-start gap-1">
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded border text-xs font-semibold ${getStatusBadgeClass(
+                                  dispStatus
+                                )}`}
+                              >
+                                {dispStatus}
+                              </span>
+                              {adminState.needsAdminPayment && (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded border text-[11px] font-semibold bg-amber-50 text-amber-800 border-amber-200">
+                                  Menunggu Admin
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="py-3.5 px-4 text-right whitespace-nowrap">
                             {loan.remainingAmount > 0 ? (
@@ -550,10 +681,24 @@ export function LoansPage({ accounts }: LoansPageProps) {
                                 onClick={() => openPayModal(loan)}
                                 className="min-h-[36px] px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-medium hover:bg-emerald-800 cursor-pointer"
                               >
-                                Bayar Cicilan
+                                Bayar / Cicil
+                              </button>
+                            ) : adminState.needsAdminPayment ? (
+                              <button
+                                type="button"
+                                onClick={() => openPayModal(loan)}
+                                className="min-h-[36px] px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium hover:bg-amber-700 cursor-pointer"
+                              >
+                                Bayar Admin
                               </button>
                             ) : (
-                              <span className="text-xs text-slate-400 font-medium">Selesai</span>
+                              <button
+                                type="button"
+                                onClick={() => openPayModal(loan)}
+                                className="min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 text-xs font-medium hover:bg-slate-100 cursor-pointer"
+                              >
+                                {adminState.paidAdminFee > 0 ? '+ Biaya Admin' : 'Bayar Admin'}
+                              </button>
                             )}
                           </td>
                         </tr>
@@ -572,12 +717,12 @@ export function LoansPage({ accounts }: LoansPageProps) {
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-200">
             <h3 className="font-display font-semibold text-base text-slate-900">
-              Riwayat Pembayaran Cicilan &amp; Pelunasan Pinjaman
+              Riwayat Pembayaran Pokok &amp; Biaya Admin Pinjaman
             </h3>
           </div>
           {payments.length === 0 ? (
             <div className="p-8 text-center text-sm text-slate-500">
-              Belum ada pembayaran cicilan pinjaman yang tercatat.
+              Belum ada pembayaran cicilan atau biaya admin pinjaman yang tercatat.
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -588,34 +733,45 @@ export function LoansPage({ accounts }: LoansPageProps) {
                     <th className="py-3 px-4 whitespace-nowrap">No. Pembayaran</th>
                     <th className="py-3 px-4 whitespace-nowrap">Peminjam (Ref)</th>
                     <th className="py-3 px-4 whitespace-nowrap">Masuk Rekening</th>
-                    <th className="py-3 px-4 text-right whitespace-nowrap">Nominal Bayar</th>
-                    <th className="py-3 px-4 text-right whitespace-nowrap">Sisa Setelah Bayar</th>
+                    <th className="py-3 px-4 text-right whitespace-nowrap">Pokok</th>
+                    <th className="py-3 px-4 text-right whitespace-nowrap">Biaya Admin</th>
+                    <th className="py-3 px-4 text-right whitespace-nowrap">Total Masuk</th>
+                    <th className="py-3 px-4 text-right whitespace-nowrap">Sisa Pokok</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-sm">
-                  {payments.map((p) => (
-                    <tr key={p.id} className="hover:bg-slate-50">
-                      <td className="py-3 px-4 font-mono-num text-xs text-slate-600 whitespace-nowrap">
-                        {p.transactionDate} · {p.transactionTime}
-                      </td>
-                      <td className="py-3 px-4 font-mono-num text-xs font-semibold text-slate-900 whitespace-nowrap">
-                        {p.transactionNumber}
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="font-medium text-slate-900">{p.borrowerName}</div>
-                        <div className="text-xs font-mono-num text-slate-500">{p.loanNumber}</div>
-                      </td>
-                      <td className="py-3 px-4 text-xs text-slate-700 whitespace-nowrap">
-                        {p.accountName}
-                      </td>
-                      <td className="py-3 px-4 text-right font-mono-num font-semibold text-emerald-700 whitespace-nowrap">
-                        +{formatRupiah(p.amount)}
-                      </td>
-                      <td className="py-3 px-4 text-right font-mono-num text-slate-900 whitespace-nowrap">
-                        {formatRupiah(p.remainingAfter)}
-                      </td>
-                    </tr>
-                  ))}
+                  {payments.map((p) => {
+                    const parts = getLoanPaymentBreakdown(p);
+                    return (
+                      <tr key={p.id} className="hover:bg-slate-50">
+                        <td className="py-3 px-4 font-mono-num text-xs text-slate-600 whitespace-nowrap">
+                          {p.transactionDate} · {p.transactionTime}
+                        </td>
+                        <td className="py-3 px-4 font-mono-num text-xs font-semibold text-slate-900 whitespace-nowrap">
+                          {p.transactionNumber}
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-medium text-slate-900">{p.borrowerName}</div>
+                          <div className="text-xs font-mono-num text-slate-500">{p.loanNumber}</div>
+                        </td>
+                        <td className="py-3 px-4 text-xs text-slate-700 whitespace-nowrap">
+                          {p.accountName}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-num text-slate-800 whitespace-nowrap">
+                          {formatRupiah(parts.principalPaid)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-num text-emerald-700 whitespace-nowrap">
+                          {formatRupiah(parts.adminFeePaid)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-num font-semibold text-emerald-700 whitespace-nowrap">
+                          +{formatRupiah(parts.totalAmount)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono-num text-slate-900 whitespace-nowrap">
+                          {formatRupiah(p.remainingAfter)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -632,7 +788,8 @@ export function LoansPage({ accounts }: LoansPageProps) {
                 Rekapitulasi Laporan Pinjaman Uang Pelanggan
               </h3>
               <p className="text-xs text-slate-500">
-                Posisi per {formatIndonesianDate(todayStr)} (terpisah dari omzet &amp; beban usaha)
+                Posisi per {formatIndonesianDate(todayStr)} (pokok terpisah dari omzet; biaya admin
+                masuk pendapatan jasa)
               </p>
             </div>
           </div>
@@ -646,15 +803,23 @@ export function LoansPage({ accounts }: LoansPageProps) {
                 </span>
               </div>
               <div className="px-4 py-3 flex justify-between">
-                <span className="text-slate-600">Total Cicilan &amp; Pelunasan Diterima</span>
+                <span className="text-slate-600">Total Pengembalian Pokok Diterima</span>
                 <span className="font-mono-num font-semibold text-emerald-700">
                   {formatRupiah(totalPaid)}
                 </span>
               </div>
               <div className="px-4 py-3 flex justify-between bg-amber-50/60">
-                <span className="font-semibold text-slate-900">Total Piutang Belum Lunas</span>
+                <span className="font-semibold text-slate-900">Total Sisa Piutang Pokok</span>
                 <span className="font-mono-num font-bold text-amber-800">
                   {formatRupiah(totalRemaining)}
+                </span>
+              </div>
+              <div className="px-4 py-3 flex justify-between bg-emerald-50/60">
+                <span className="font-semibold text-slate-900">
+                  Total Biaya Admin Diterima (Pendapatan)
+                </span>
+                <span className="font-mono-num font-bold text-emerald-700">
+                  {formatRupiah(totalAdminFeePaid)}
                 </span>
               </div>
             </div>
@@ -681,10 +846,16 @@ export function LoansPage({ accounts }: LoansPageProps) {
                 </span>
               </div>
               <div className="px-4 py-3 flex justify-between">
-                <span className="text-slate-600">Pinjaman Status Lunas</span>
+                <span className="text-slate-600">Pinjaman Pokok Lunas</span>
                 <span className="font-mono-num font-semibold text-emerald-700">
                   {loans.filter((l) => getLoanDisplayStatus(l, todayStr) === 'Lunas').length}{' '}
                   transaksi
+                </span>
+              </div>
+              <div className="px-4 py-3 flex justify-between">
+                <span className="text-slate-600">Pokok Lunas Menunggu Target Admin</span>
+                <span className="font-mono-num font-semibold text-amber-700">
+                  {awaitingAdminLoans.length} transaksi
                 </span>
               </div>
             </div>
@@ -769,7 +940,7 @@ export function LoansPage({ accounts }: LoansPageProps) {
 
               <div className="sm:col-span-2 space-y-1">
                 <label htmlFor="loan-amt" className="block text-xs font-medium text-slate-700">
-                  Jumlah Pinjaman (Rp)
+                  Jumlah Pinjaman / Pokok (Rp)
                 </label>
                 <input
                   id="loan-amt"
@@ -782,6 +953,47 @@ export function LoansPage({ accounts }: LoansPageProps) {
                   placeholder="Contoh: 200000"
                   className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
                 />
+              </div>
+
+              <div className="sm:col-span-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="loan-admin" className="block text-xs font-medium text-slate-700">
+                    Biaya Admin (Rp · Opsional &amp; Fleksibel)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setLoanAdminFee('')}
+                    className="text-xs font-semibold text-emerald-700 hover:underline cursor-pointer"
+                  >
+                    Kosongkan (Fleksibel)
+                  </button>
+                </div>
+                <input
+                  id="loan-admin"
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={loanAdminFee}
+                  onChange={(e) => setLoanAdminFee(e.target.value)}
+                  placeholder="Kosongkan = tentukan bebas setelah pinjaman dikembalikan"
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+                <div className="flex flex-wrap gap-1.5">
+                  {[0, 5000, 10000, 20000, 50000].map((val) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setLoanAdminFee(val === 0 ? '' : String(val))}
+                      className="px-2.5 py-1 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-medium text-slate-700 cursor-pointer"
+                    >
+                      {val === 0 ? 'Fleksibel (Nanti)' : formatRupiah(val)}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Tidak dipotong di awal pencairan (uang keluar 100% sesuai pokok). Biaya admin
+                  dibayar setelah pengembalian pinjaman dan nominalnya dapat diubah kapan saja.
+                </p>
               </div>
 
               <div className="space-y-1">
@@ -850,17 +1062,19 @@ export function LoansPage({ accounts }: LoansPageProps) {
         </div>
       )}
 
-      {/* Modal Cicilan / Pelunasan */}
-      {payingLoan && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+      {/* Modal Cicilan / Pelunasan / Bayar Admin Fleksibel */}
+      {payingLoan && payingAdminState && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4 overflow-y-auto">
           <form
             onSubmit={handleRecordPayment}
-            className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-5 space-y-4"
+            className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-5 space-y-4 my-auto"
           >
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="font-display font-semibold text-base text-slate-900">
-                  Terima Cicilan / Pelunasan
+                  {payingLoan.remainingAmount > 0
+                    ? 'Terima Pengembalian & Biaya Admin'
+                    : 'Bayar Biaya Admin Pinjaman'}
                 </h3>
                 <div className="text-xs font-mono-num text-slate-500">
                   {payingLoan.borrowerName} · {payingLoan.transactionNumber}
@@ -875,46 +1089,179 @@ export function LoansPage({ accounts }: LoansPageProps) {
               </button>
             </div>
 
-            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs space-y-1 font-mono-num">
+            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs space-y-1.5 font-mono-num">
               <div className="flex justify-between">
                 <span className="text-slate-500">Pokok Pinjaman</span>
                 <span className="text-slate-900">{formatRupiah(payingLoan.principalAmount)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-500">Sudah Dibayar</span>
+                <span className="text-slate-500">Pokok Sudah Dibayar</span>
                 <span className="text-emerald-700">{formatRupiah(payingLoan.paidAmount)}</span>
               </div>
               <div className="flex justify-between font-bold border-t border-slate-200 pt-1">
-                <span className="text-slate-700">Sisa Pinjaman</span>
-                <span className="text-amber-800">{formatRupiah(payingLoan.remainingAmount)}</span>
+                <span className="text-slate-700">Sisa Pokok Pinjaman</span>
+                <span
+                  className={
+                    payingLoan.remainingAmount > 0 ? 'text-amber-800' : 'text-emerald-700'
+                  }
+                >
+                  {payingLoan.remainingAmount > 0
+                    ? formatRupiah(payingLoan.remainingAmount)
+                    : 'Rp0 (Lunas)'}
+                </span>
               </div>
+              <div className="flex justify-between items-center border-t border-slate-200 pt-1">
+                <span className="text-slate-500">Target Biaya Admin</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-800">
+                    {payingAdminState.isFlexible
+                      ? 'Fleksibel'
+                      : formatRupiah(payingAdminState.targetAdminFee)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setEditingTargetAdmin((v) => !v)}
+                    className="inline-flex items-center gap-0.5 text-[11px] font-sans font-semibold text-emerald-700 hover:underline cursor-pointer"
+                  >
+                    <Pencil className="w-3 h-3" />
+                    <span>{editingTargetAdmin ? 'Tutup' : 'Ubah'}</span>
+                  </button>
+                </div>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Biaya Admin Masuk</span>
+                <span className="text-emerald-700">
+                  {formatRupiah(payingAdminState.paidAdminFee)}
+                </span>
+              </div>
+
+              {editingTargetAdmin && (
+                <div className="pt-2 border-t border-slate-200 space-y-1.5 font-sans">
+                  <label
+                    htmlFor="edit-target-admin"
+                    className="block text-[11px] font-medium text-slate-700"
+                  >
+                    Atur Target Biaya Admin (0 = Fleksibel)
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      id="edit-target-admin"
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={targetAdminDraft}
+                      onChange={(e) => setTargetAdminDraft(e.target.value)}
+                      placeholder="0 = Fleksibel"
+                      className="flex-1 min-h-[36px] px-2.5 py-1 rounded border border-slate-300 text-xs font-mono-num bg-white"
+                    />
+                    <button
+                      type="button"
+                      disabled={savingTargetAdmin}
+                      onClick={handleSaveTargetAdminFee}
+                      className="min-h-[36px] px-3 py-1 rounded bg-slate-800 text-white text-xs font-medium hover:bg-slate-900 disabled:opacity-50 cursor-pointer"
+                    >
+                      {savingTargetAdmin ? '...' : 'Simpan'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-3">
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label htmlFor="pay-loan-amt" className="block text-xs font-medium text-slate-700">
-                    Nominal Pembayaran (Rp)
+              {/* Input Bayar Pokok */}
+              {payingLoan.remainingAmount > 0 ? (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="pay-loan-principal"
+                      className="block text-xs font-medium text-slate-700"
+                    >
+                      Bayar Pokok Pinjaman (Rp)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPayPrincipal('0')}
+                        className="text-[11px] font-medium text-slate-600 hover:underline cursor-pointer"
+                      >
+                        Rp0 (Admin Saja)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPayPrincipal(String(payingLoan.remainingAmount))}
+                        className="text-xs font-semibold text-emerald-700 hover:underline cursor-pointer"
+                      >
+                        Lunasi Pokok
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    id="pay-loan-principal"
+                    type="number"
+                    min="0"
+                    max={payingLoan.remainingAmount}
+                    step="1"
+                    value={payPrincipal}
+                    onChange={(e) => setPayPrincipal(e.target.value)}
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+              ) : (
+                <div className="px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
+                  Pokok pinjaman sudah lunas 100%. Silakan masukkan nominal biaya admin fleksibel di
+                  bawah ini.
+                </div>
+              )}
+
+              {/* Input Biaya Admin Fleksibel */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="pay-loan-admin" className="block text-xs font-medium text-slate-700">
+                    Bayar Biaya Admin (Rp · Fleksibel)
                   </label>
-                  <button
-                    type="button"
-                    onClick={() => setPayAmount(String(payingLoan.remainingAmount))}
-                    className="text-xs font-semibold text-emerald-700 hover:underline cursor-pointer"
-                  >
-                    Lunasi Semua
-                  </button>
+                  {payingAdminState.remainingTargetAdminFee > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPayAdminFee(String(payingAdminState.remainingTargetAdminFee))
+                      }
+                      className="text-xs font-semibold text-amber-700 hover:underline cursor-pointer"
+                    >
+                      Isi Sisa Target ({formatRupiah(payingAdminState.remainingTargetAdminFee)})
+                    </button>
+                  )}
                 </div>
                 <input
-                  id="pay-loan-amt"
+                  id="pay-loan-admin"
                   type="number"
-                  required
-                  min="1"
-                  max={payingLoan.remainingAmount}
+                  min="0"
                   step="1"
-                  value={payAmount}
-                  onChange={(e) => setPayAmount(e.target.value)}
+                  value={payAdminFee}
+                  onChange={(e) => setPayAdminFee(e.target.value)}
+                  placeholder={
+                    payingLoan.remainingAmount > 0
+                      ? '0 (opsional, atau bayar setelah pokok kembali)'
+                      : 'Masukkan biaya admin fleksibel (contoh: 10000)'
+                  }
                   className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
                 />
+                <div className="flex flex-wrap gap-1.5">
+                  {[0, 5000, 10000, 20000, 50000].map((val) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setPayAdminFee(val === 0 ? '' : String(val))}
+                      className="px-2.5 py-1 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-medium text-slate-700 cursor-pointer"
+                    >
+                      {val === 0 ? 'Rp0 (Nanti)' : formatRupiah(val)}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  {payingLoan.remainingAmount > 0
+                    ? 'Biaya admin dapat dikosongkan sekarang dan dibayar belakangan setelah pinjaman pokok dikembalikan.'
+                    : 'Nominal bebas sesuai kesepakatan akhir dan langsung masuk pendapatan jasa.'}
+                </p>
               </div>
 
               <div className="space-y-1">
@@ -946,9 +1293,19 @@ export function LoansPage({ accounts }: LoansPageProps) {
                   maxLength={240}
                   value={payNotes}
                   onChange={(e) => setPayNotes(e.target.value)}
-                  placeholder="Cicilan ke-1, transfer BRI, dll"
+                  placeholder="Biaya admin setelah pelunasan, transfer BRI, dll"
                   className="w-full min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
                 />
+              </div>
+
+              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-between text-xs">
+                <span className="font-medium text-emerald-900">
+                  Total Uang Masuk ({formatRupiah(modalPrincipalNum)} pokok +{' '}
+                  {formatRupiah(modalAdminNum)} admin)
+                </span>
+                <span className="font-mono-num text-sm font-bold text-emerald-800">
+                  {formatRupiah(modalTotalIn)}
+                </span>
               </div>
             </div>
 
@@ -962,7 +1319,7 @@ export function LoansPage({ accounts }: LoansPageProps) {
               </button>
               <button
                 type="submit"
-                disabled={savingPay}
+                disabled={savingPay || modalTotalIn <= 0}
                 className="min-h-[44px] inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-emerald-700 text-white text-sm font-medium hover:bg-emerald-800 disabled:opacity-50 cursor-pointer"
               >
                 <Check className="w-4 h-4" />

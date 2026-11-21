@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { NetworkProvider, useNetwork } from './contexts/NetworkContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -20,7 +20,7 @@ import { PpobPage } from './pages/PpobPage';
 import { PurchasesPage } from './pages/PurchasesPage';
 import { StockOpnamePage } from './pages/StockOpnamePage';
 import { ClosingKasirPage } from './pages/ClosingKasirPage';
-import { canAccessNavTab, resolveSafeNavTab } from './utils/rbac';
+import { canAccessNavTab, parseNavTab, resolveSafeNavTab } from './utils/rbac';
 import type {
   Account,
   Category,
@@ -42,6 +42,7 @@ import {
 } from './services/inventoryService';
 import { subscribeStockBatches } from './services/batchService';
 import { subscribeCustomers } from './services/receivableService';
+import { collectExpiryAlerts } from './utils/expiryUtils';
 import { getTodayDateString } from './utils/formatters';
 
 const INITIAL_METRICS: TodayDashboardMetrics = {
@@ -64,7 +65,11 @@ function AuthenticatedWorkspace() {
   const { user, isAdmin, isActiveStaff } = useAuth();
   const { markPendingWrite } = useNetwork();
 
-  const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<NavTab>(() => {
+    if (typeof window === 'undefined') return 'dashboard';
+    return parseNavTab(window.history.state?.tab ?? window.location.hash, isAdmin);
+  });
+  const historySeededRef = useRef(false);
   const [storeSetting, setStoreSetting] = useState<StoreSetting | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
@@ -188,10 +193,36 @@ function AuthenticatedWorkspace() {
   }, [user, isActiveStaff, isAdmin, categoriesLoaded, categories]);
 
   useEffect(() => {
-    if (isActiveStaff) {
-      setActiveTab('dashboard');
+    if (!isActiveStaff) {
+      historySeededRef.current = false;
+      return;
     }
-  }, [isActiveStaff]);
+    if (!historySeededRef.current && typeof window !== 'undefined') {
+      historySeededRef.current = true;
+      const initialTab = parseNavTab(
+        window.history.state?.tab ?? window.location.hash,
+        isAdmin
+      );
+      setActiveTab(initialTab);
+      const rootUrl = `${window.location.pathname}${window.location.search}`;
+      if (!window.history.state?.tab) {
+        window.history.replaceState({ tab: 'dashboard' }, '', rootUrl);
+        if (initialTab !== 'dashboard') {
+          window.history.pushState({ tab: initialTab }, '', `#${initialTab}`);
+        }
+      }
+    }
+  }, [isActiveStaff, isAdmin]);
+
+  useEffect(() => {
+    if (!isActiveStaff || typeof window === 'undefined') return;
+    const handlePopState = (event: PopStateEvent) => {
+      const nextTab = parseNavTab(event.state?.tab ?? window.location.hash, isAdmin);
+      setActiveTab(nextTab);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [isActiveStaff, isAdmin]);
 
   if (!isActiveStaff) {
     return <PendingAccessPage />;
@@ -201,7 +232,17 @@ function AuthenticatedWorkspace() {
   const safeTab: NavTab = resolveSafeNavTab(activeTab, isAdmin);
 
   const handleNavigate = (tab: NavTab) => {
-    setActiveTab(resolveSafeNavTab(tab, isAdmin));
+    const target = resolveSafeNavTab(tab, isAdmin);
+    if (target === safeTab) return;
+    setActiveTab(target);
+    if (typeof window !== 'undefined') {
+      const targetUrl =
+        target === 'dashboard'
+          ? `${window.location.pathname}${window.location.search}`
+          : `#${target}`;
+      window.history.pushState({ tab: target }, '', targetUrl);
+      window.scrollTo(0, 0);
+    }
   };
 
   const computedLowStockCount = products.filter(
@@ -212,6 +253,20 @@ function AuthenticatedWorkspace() {
     lowStockCount: computedLowStockCount,
   };
 
+  const expiryAlerts = useMemo(
+    () => collectExpiryAlerts(products, stockBatches),
+    [products, stockBatches]
+  );
+
+  const handleOpenExpiryMonitoring = () => {
+    handleNavigate('dashboard');
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        document.getElementById('monitoring-kedaluwarsa')?.scrollIntoView({ behavior: 'smooth' });
+      }, 120);
+    }
+  };
+
   const storeName = storeSetting?.storeName || 'KEDAI KHANXA';
 
   return (
@@ -219,6 +274,8 @@ function AuthenticatedWorkspace() {
       activeTab={safeTab}
       onSelectTab={handleNavigate}
       storeName={storeName}
+      expiryAlerts={expiryAlerts}
+      onOpenExpiryMonitoring={handleOpenExpiryMonitoring}
     >
       {safeTab === 'dashboard' && (
         <DashboardPage
@@ -243,10 +300,10 @@ function AuthenticatedWorkspace() {
         />
       )}
       {safeTab === 'mini_atm' && (
-        <MiniAtmPage accounts={accounts} storeSetting={storeSetting} />
+        <MiniAtmPage accounts={accounts} customers={customers} storeSetting={storeSetting} />
       )}
       {safeTab === 'ppob' && (
-        <PpobPage accounts={accounts} storeSetting={storeSetting} />
+        <PpobPage accounts={accounts} customers={customers} storeSetting={storeSetting} />
       )}
       {safeTab === 'products' && canAccessNavTab('products', isAdmin) && isAdmin && (
         <ProductsPage

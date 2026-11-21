@@ -17,6 +17,7 @@ import type {
   Account,
   CashierClosing,
   CashierClosingReviewStatus,
+  DigitalAccountAdjustment,
   MiniAtmTransaction,
   PpobTransaction,
   Receivable,
@@ -136,6 +137,9 @@ export interface FinalizeClosingInput {
   openingCash: number;
   actualCash: number;
   notes?: string;
+  applyAdjustment?: boolean;
+  adjustmentDescription?: string;
+  digitalAdjustments?: DigitalAccountAdjustment[];
   breakdown: CashierClosingBreakdown;
 }
 
@@ -161,6 +165,9 @@ export async function finalizeCashierClosing(
   const variance = evaluateClosingVariance(input.breakdown.expectedCash, actualCash);
   const cleanShift = (input.shiftLabel || '').trim().slice(0, 60);
   const cleanNotes = (input.notes || '').trim().slice(0, 300);
+  const applyAdjustment = Boolean(input.applyAdjustment);
+  const cleanAdjustmentDesc = (input.adjustmentDescription || '').trim().slice(0, 300);
+  const digitalAdjustments = input.digitalAdjustments || [];
 
   if (variance.status !== 'balance' && cleanNotes.length === 0) {
     throw new Error(
@@ -197,6 +204,9 @@ export async function finalizeCashierClosing(
     actualCash: variance.actualCash,
     varianceAmount: variance.varianceAmount,
     status: variance.status,
+    applyAdjustment,
+    ...(cleanAdjustmentDesc ? { adjustmentDescription: cleanAdjustmentDesc } : {}),
+    ...(digitalAdjustments.length > 0 ? { digitalAdjustments } : {}),
     ...(cleanNotes ? { notes: cleanNotes } : {}),
     isFinalized: true,
     reviewStatus: 'pending',

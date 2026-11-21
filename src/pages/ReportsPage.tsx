@@ -1439,6 +1439,14 @@ export function ReportsPage({
                 </div>
                 <div className="px-5 py-3 flex justify-between">
                   <span className="text-slate-600">
+                    (+) Biaya Admin Pinjaman Diterima
+                  </span>
+                  <span className="font-mono-num text-emerald-700">
+                    {formatRupiah(profitReport.loanAdminFeeProfit)}
+                  </span>
+                </div>
+                <div className="px-5 py-3 flex justify-between">
+                  <span className="text-slate-600">
                     (-) Biaya QRIS ({profitReport.qrisTransactionCount} trx QRIS)
                   </span>
                   <span className="font-mono-num font-semibold text-amber-700">

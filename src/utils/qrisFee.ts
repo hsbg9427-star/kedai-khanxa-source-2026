@@ -159,6 +159,204 @@ export function calculateSaleSettlement(input: SaleSettlementInput): SaleSettlem
   };
 }
 
+export interface PosCustomerMatchResult {
+  matchedCustomer: Customer | null;
+  isNewCustomer: boolean;
+  cleanName: string;
+}
+
+export function resolvePosCustomerMatch(
+  customers: Customer[],
+  typedName: string,
+  explicitCustomerId?: string
+): PosCustomerMatchResult {
+  if (explicitCustomerId) {
+    const byId = customers.find((c) => c.id === explicitCustomerId) || null;
+    if (byId) {
+      return {
+        matchedCustomer: byId,
+        isNewCustomer: false,
+        cleanName: byId.name,
+      };
+    }
+  }
+  const clean = typedName.trim().slice(0, 100);
+  if (!clean || clean.toLowerCase() === 'umum') {
+    return {
+      matchedCustomer: null,
+      isNewCustomer: false,
+      cleanName: '',
+    };
+  }
+  const exact =
+    customers.find((c) => c.name.trim().toLowerCase() === clean.toLowerCase()) || null;
+  if (exact) {
+    return {
+      matchedCustomer: exact,
+      isNewCustomer: false,
+      cleanName: exact.name,
+    };
+  }
+  return {
+    matchedCustomer: null,
+    isNewCustomer: true,
+    cleanName: clean,
+  };
+}
+
+export interface CombinedPosSettlementInput {
+  saleTotalAmount: number;
+  paymentMethod: RetailPaymentMethod;
+  paidAmount: number;
+  cashPart?: number;
+  qrisPart?: number;
+  qrisFeePercent: number;
+  customerPrevDebt: number;
+  receivablePayAmount: number;
+}
+
+export interface CombinedPosSettlementResult {
+  saleSettlement: SaleSettlementResult;
+  receivablePaidAmount: number;
+  receivableCashIn: number;
+  receivableQrisIn: number;
+  grandTotalDue: number;
+  grandPaidAmount: number;
+  grandChangeAmount: number;
+  customerDebtBefore: number;
+  customerDebtAfter: number;
+}
+
+export function calculateCombinedPosSettlement(
+  input: CombinedPosSettlementInput
+): CombinedPosSettlementResult {
+  const cleanSaleTotal = roundMoney(Math.max(0, Number(input.saleTotalAmount) || 0));
+  const cleanPrevDebt = roundMoney(Math.max(0, Number(input.customerPrevDebt) || 0));
+  const rawRecPay = roundMoney(Math.max(0, Number(input.receivablePayAmount) || 0));
+
+  if (input.paymentMethod === 'debt') {
+    if (rawRecPay > 0) {
+      throw new Error(
+        'Pembayaran piutang lama sekaligus tidak tersedia saat memilih metode Kasbon.'
+      );
+    }
+    const saleSettlement = calculateSaleSettlement({
+      totalAmount: cleanSaleTotal,
+      paymentMethod: 'debt',
+      paidAmount: input.paidAmount,
+      qrisFeePercent: input.qrisFeePercent,
+    });
+    return {
+      saleSettlement,
+      receivablePaidAmount: 0,
+      receivableCashIn: 0,
+      receivableQrisIn: 0,
+      grandTotalDue: cleanSaleTotal,
+      grandPaidAmount: saleSettlement.paidAmount,
+      grandChangeAmount: 0,
+      customerDebtBefore: cleanPrevDebt,
+      customerDebtAfter: roundMoney(cleanPrevDebt + saleSettlement.debtAmount),
+    };
+  }
+
+  if (rawRecPay > cleanPrevDebt + 0.001) {
+    throw new Error('Nominal bayar piutang melebihi total sisa piutang pelanggan.');
+  }
+  const cleanRecPay = roundMoney(Math.min(rawRecPay, cleanPrevDebt));
+  const grandTotalDue = roundMoney(cleanSaleTotal + cleanRecPay);
+
+  const feeRateRaw = Number(input.qrisFeePercent);
+  const qrisFeeRateInput = Number.isFinite(feeRateRaw)
+    ? Math.max(0, Math.min(10, Number(feeRateRaw.toFixed(4))))
+    : DEFAULT_QRIS_FEE_PERCENT;
+
+  if (input.paymentMethod === 'mixed') {
+    const cleanQris = roundMoney(Math.max(0, Number(input.qrisPart) || 0));
+    const cleanCash = roundMoney(Math.max(0, Number(input.cashPart) || 0));
+
+    if (cleanQris <= 0) {
+      throw new Error('Nominal bagian QRIS harus lebih dari Rp0 untuk pembayaran gabungan.');
+    }
+    if (cleanCash <= 0) {
+      throw new Error('Nominal bagian Tunai harus lebih dari Rp0 untuk pembayaran gabungan.');
+    }
+    if (cleanQris > grandTotalDue) {
+      throw new Error('Nominal bagian QRIS tidak boleh melebihi total tagihan.');
+    }
+
+    const grandPaidAmount = roundMoney(cleanCash + cleanQris);
+    if (grandPaidAmount < grandTotalDue) {
+      throw new Error('Total gabungan Tunai + QRIS kurang dari total tagihan.');
+    }
+    const grandChangeAmount = roundMoney(Math.max(0, grandPaidAmount - grandTotalDue));
+
+    const saleQris = roundMoney(Math.min(cleanQris, cleanSaleTotal));
+    const saleCash = roundMoney(Math.max(0, cleanSaleTotal - saleQris));
+    const recQris = roundMoney(Math.min(cleanRecPay, Math.max(0, cleanQris - saleQris)));
+    const recCash = roundMoney(Math.max(0, cleanRecPay - recQris));
+
+    const qrisFeeAmount = roundMoney(saleQris * (qrisFeeRateInput / 100));
+    const qrisNetDepositAmount = roundMoney(Math.max(0, saleQris - qrisFeeAmount));
+    const netReceivedAmount = roundMoney(saleCash + qrisNetDepositAmount);
+
+    const saleSettlement: SaleSettlementResult = {
+      paymentMethod: 'mixed',
+      paidAmount: cleanSaleTotal,
+      changeAmount: 0,
+      debtAmount: 0,
+      cashPaidPart: saleCash,
+      qrisAmount: saleQris,
+      qrisFeeRate: saleQris > 0 ? qrisFeeRateInput : 0,
+      qrisFeeAmount,
+      netReceivedAmount,
+      cashDepositAmount: saleCash,
+      qrisNetDepositAmount,
+    };
+
+    return {
+      saleSettlement,
+      receivablePaidAmount: cleanRecPay,
+      receivableCashIn: recCash,
+      receivableQrisIn: recQris,
+      grandTotalDue,
+      grandPaidAmount,
+      grandChangeAmount,
+      customerDebtBefore: cleanPrevDebt,
+      customerDebtAfter: roundMoney(Math.max(0, cleanPrevDebt - cleanRecPay)),
+    };
+  }
+
+  const grandPaidAmount = roundMoney(Math.max(0, Number(input.paidAmount) || 0));
+  if (grandPaidAmount < grandTotalDue) {
+    throw new Error(
+      cleanRecPay > 0
+        ? 'Nominal pembayaran kurang dari total belanja + bayar piutang.'
+        : 'Nominal pembayaran kurang dari total belanja.'
+    );
+  }
+  const grandChangeAmount = roundMoney(Math.max(0, grandPaidAmount - grandTotalDue));
+
+  const saleSettlement = calculateSaleSettlement({
+    totalAmount: cleanSaleTotal,
+    paymentMethod: input.paymentMethod,
+    paidAmount: cleanSaleTotal,
+    qrisFeePercent: qrisFeeRateInput,
+  });
+
+  return {
+    saleSettlement,
+    receivablePaidAmount: cleanRecPay,
+    receivableCashIn:
+      input.paymentMethod === 'cash' || input.paymentMethod === 'transfer' ? cleanRecPay : 0,
+    receivableQrisIn: input.paymentMethod === 'qris' ? cleanRecPay : 0,
+    grandTotalDue,
+    grandPaidAmount,
+    grandChangeAmount,
+    customerDebtBefore: cleanPrevDebt,
+    customerDebtAfter: roundMoney(Math.max(0, cleanPrevDebt - cleanRecPay)),
+  };
+}
+
 export type LoanDisplayStatus = 'Lunas' | 'Terlambat' | 'Cicilan' | 'Belum Bayar';
 
 export function getLoanDisplayStatus(
@@ -177,6 +375,53 @@ export function getLoanDisplayStatus(
     return 'Cicilan';
   }
   return 'Belum Bayar';
+}
+
+export function getLoanPaymentBreakdown(
+  payment: Pick<LoanPayment, 'amount' | 'principalPaid' | 'adminFeePaid'>
+): {
+  totalAmount: number;
+  principalPaid: number;
+  adminFeePaid: number;
+} {
+  if (payment.principalPaid !== undefined || payment.adminFeePaid !== undefined) {
+    const principalPaid = roundMoney(Math.max(0, Number(payment.principalPaid) || 0));
+    const adminFeePaid = roundMoney(Math.max(0, Number(payment.adminFeePaid) || 0));
+    const totalAmount = roundMoney(
+      payment.amount !== undefined ? Number(payment.amount) || 0 : principalPaid + adminFeePaid
+    );
+    return { totalAmount, principalPaid, adminFeePaid };
+  }
+  const legacyAmount = roundMoney(Math.max(0, Number(payment.amount) || 0));
+  return {
+    totalAmount: legacyAmount,
+    principalPaid: legacyAmount,
+    adminFeePaid: 0,
+  };
+}
+
+export function getLoanAdminFeeState(
+  loan: Pick<Loan, 'adminFee' | 'adminFeePaid' | 'remainingAmount'>
+): {
+  targetAdminFee: number;
+  paidAdminFee: number;
+  remainingTargetAdminFee: number;
+  isFlexible: boolean;
+  isPrincipalPaidOff: boolean;
+  needsAdminPayment: boolean;
+} {
+  const targetAdminFee = roundMoney(Math.max(0, Number(loan.adminFee) || 0));
+  const paidAdminFee = roundMoney(Math.max(0, Number(loan.adminFeePaid) || 0));
+  const remainingTargetAdminFee = roundMoney(Math.max(0, targetAdminFee - paidAdminFee));
+  const isPrincipalPaidOff = roundMoney(Math.max(0, Number(loan.remainingAmount) || 0)) <= 0;
+  return {
+    targetAdminFee,
+    paidAdminFee,
+    remainingTargetAdminFee,
+    isFlexible: targetAdminFee <= 0,
+    isPrincipalPaidOff,
+    needsAdminPayment: isPrincipalPaidOff && remainingTargetAdminFee > 0,
+  };
 }
 
 export type ReportPeriodType = 'daily' | 'weekly' | 'monthly' | 'yearly';
@@ -269,14 +514,16 @@ export interface FinancialAndQrisReportSummary {
   ppobProfit: number;
   expensesCount: number;
   expensesTotal: number;
-  netOperatingProfit: number; // (salesGrossProfit + miniAtmProfit + ppobProfit) - qrisFeeTotal - expensesTotal
+  netOperatingProfit: number; // (salesGrossProfit + miniAtmProfit + ppobProfit + loanAdminFeesInPeriod) - qrisFeeTotal - expensesTotal
   loansDisbursedCountInPeriod: number;
   loansDisbursedInPeriod: number;
   loanPaymentsCountInPeriod: number;
-  loanPaymentsInPeriod: number;
+  loanPaymentsInPeriod: number; // Cicilan pokok pinjaman masuk (non-laba)
+  loanAdminFeesInPeriod: number; // Biaya admin pinjaman diterima (pendapatan jasa)
   totalLoansPrincipalAllTime: number;
   totalLoansPaidAllTime: number;
   totalLoansRemainingAllTime: number;
+  totalLoansAdminFeePaidAllTime: number;
   overdueLoansCount: number;
   totalCustomerKasbonRemaining: number;
   totalActiveAccountBalance: number;
@@ -375,18 +622,22 @@ export function buildFinancialAndQrisReport(params: {
     periodExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0)
   );
 
+  const periodLoanPayments = params.loanPayments.filter((p) => inRange(p.transactionDate));
+  let loanPaymentsInPeriod = 0;
+  let loanAdminFeesInPeriod = 0;
+  for (const p of periodLoanPayments) {
+    const parts = getLoanPaymentBreakdown(p);
+    loanPaymentsInPeriod = roundMoney(loanPaymentsInPeriod + parts.principalPaid);
+    loanAdminFeesInPeriod = roundMoney(loanAdminFeesInPeriod + parts.adminFeePaid);
+  }
+
   const netOperatingProfit = roundMoney(
-    salesGrossProfit + miniAtmProfit + ppobProfit - qrisFeeTotal - expensesTotal
+    salesGrossProfit + miniAtmProfit + ppobProfit + loanAdminFeesInPeriod - qrisFeeTotal - expensesTotal
   );
 
   const periodLoans = params.loans.filter((l) => inRange(l.loanDate || l.transactionDate));
   const loansDisbursedInPeriod = roundMoney(
     periodLoans.reduce((sum, l) => sum + (Number(l.principalAmount) || 0), 0)
-  );
-
-  const periodLoanPayments = params.loanPayments.filter((p) => inRange(p.transactionDate));
-  const loanPaymentsInPeriod = roundMoney(
-    periodLoanPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
   );
 
   const totalLoansPrincipalAllTime = roundMoney(
@@ -397,6 +648,9 @@ export function buildFinancialAndQrisReport(params: {
   );
   const totalLoansRemainingAllTime = roundMoney(
     params.loans.reduce((sum, l) => sum + Math.max(0, Number(l.remainingAmount) || 0), 0)
+  );
+  const totalLoansAdminFeePaidAllTime = roundMoney(
+    params.loans.reduce((sum, l) => sum + Math.max(0, Number(l.adminFeePaid) || 0), 0)
   );
   const overdueLoansCount = params.loans.filter(
     (l) => getLoanDisplayStatus(l, todayStr) === 'Terlambat'
@@ -438,9 +692,11 @@ export function buildFinancialAndQrisReport(params: {
     loansDisbursedInPeriod,
     loanPaymentsCountInPeriod: periodLoanPayments.length,
     loanPaymentsInPeriod,
+    loanAdminFeesInPeriod,
     totalLoansPrincipalAllTime,
     totalLoansPaidAllTime,
     totalLoansRemainingAllTime,
+    totalLoansAdminFeePaidAllTime,
     overdueLoansCount,
     totalCustomerKasbonRemaining,
     totalActiveAccountBalance,

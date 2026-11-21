@@ -60,6 +60,30 @@ export function getEffectiveExpiryDate(
   return estimatedExpiryDate;
 }
 
+export function resolveDefaultProductExpiryInput(
+  inputDateRaw?: string,
+  actualExpiryRaw?: string
+): {
+  inputDate: string;
+  estimatedExpiryDate: string;
+  actualExpiryDate?: string;
+  expiryDate: string;
+} {
+  const trimmedInput = inputDateRaw?.trim();
+  const inputDate = trimmedInput && isValidYmd(trimmedInput) ? trimmedInput : getTodayDateString();
+  const estimatedExpiryDate = computeEstimatedExpiryDate(inputDate);
+  const trimmedActual = actualExpiryRaw?.trim();
+  const actualExpiryDate =
+    trimmedActual && isValidYmd(trimmedActual) ? trimmedActual : undefined;
+  const expiryDate = getEffectiveExpiryDate(estimatedExpiryDate, actualExpiryDate);
+  return {
+    inputDate,
+    estimatedExpiryDate,
+    actualExpiryDate,
+    expiryDate,
+  };
+}
+
 function toUtcEpochDays(ymd: string): number {
   const safe = isValidYmd(ymd) ? ymd : getTodayDateString();
   const [y, m, d] = safe.split('-').map(Number);
@@ -360,3 +384,167 @@ export function planFefoBatchDeduction(
     allocations,
   };
 }
+
+export interface ProductExpiryResolution {
+  inputDate: string;
+  estimatedExpiryDate: string;
+  effectiveExpiryDate: string;
+  isCustomExpiry: boolean;
+  hasExplicitDates: boolean;
+}
+
+export function timestampToYmd(
+  ts?: { toDate?: () => Date; seconds?: number } | null
+): string | undefined {
+  if (!ts) return undefined;
+  let d: Date | null = null;
+  if (typeof ts.toDate === 'function') {
+    d = ts.toDate();
+  } else if (typeof ts.seconds === 'number' && Number.isFinite(ts.seconds)) {
+    d = new Date(ts.seconds * 1000);
+  }
+  if (!d || Number.isNaN(d.getTime())) return undefined;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const ymd = `${y}-${m}-${day}`;
+  return isValidYmd(ymd) ? ymd : undefined;
+}
+
+export function resolveProductExpiryDates(
+  product: Pick<Product, 'inputDate' | 'expiryDate' | 'createdAt'>,
+  fallbackInputDate?: string
+): ProductExpiryResolution {
+  const hasExplicitInput = Boolean(product.inputDate && isValidYmd(product.inputDate));
+  const hasExplicitExpiry = Boolean(product.expiryDate && isValidYmd(product.expiryDate));
+  const inputDate = hasExplicitInput
+    ? (product.inputDate as string)
+    : timestampToYmd(product.createdAt) ||
+      (fallbackInputDate && isValidYmd(fallbackInputDate)
+        ? fallbackInputDate
+        : getTodayDateString());
+  const estimatedExpiryDate = computeEstimatedExpiryDate(inputDate);
+  const effectiveExpiryDate = getEffectiveExpiryDate(estimatedExpiryDate, product.expiryDate);
+  const isCustomExpiry = Boolean(
+    hasExplicitExpiry && product.expiryDate !== estimatedExpiryDate
+  );
+
+  return {
+    inputDate,
+    estimatedExpiryDate,
+    effectiveExpiryDate,
+    isCustomExpiry,
+    hasExplicitDates: hasExplicitInput || hasExplicitExpiry,
+  };
+}
+
+export interface UnifiedExpiryAlert {
+  id: string;
+  source: 'batch' | 'product';
+  productId: string;
+  productName: string;
+  productBrand?: string;
+  productVariant?: string;
+  baseUnit: string;
+  remainingBaseQty: number;
+  batchId?: string;
+  batchNumber?: string;
+  sourceNumber?: string;
+  supplierName?: string;
+  startDate: string;
+  estimatedExpiryDate: string;
+  effectiveExpiryDate: string;
+  isActualPackagingDate: boolean;
+  daysRemaining: number;
+  expiryStatus: 'MENDEKATI EXPIRED' | 'EXPIRED';
+  remainingLabel: string;
+  batch?: StockBatch & EvaluatedBatchExpiry;
+  product?: Product;
+}
+
+export function collectExpiryAlerts(
+  products: Product[],
+  stockBatches: StockBatch[],
+  referenceDateYmd: string = getTodayDateString()
+): UnifiedExpiryAlert[] {
+  const productById = new Map<string, Product>();
+  products.forEach((p) => productById.set(p.id, p));
+
+  const activePositiveBatches = stockBatches
+    .filter((b) => b.status === 'active' && Number(b.remainingBaseQty) > 0.0001)
+    .map((b) => ({
+      ...b,
+      ...evaluateBatchExpiry(b, referenceDateYmd),
+    }));
+
+  const productsWithActiveBatches = new Set(activePositiveBatches.map((b) => b.productId));
+  const alerts: UnifiedExpiryAlert[] = [];
+
+  for (const b of activePositiveBatches) {
+    if (b.expiryStatus !== 'EXPIRED' && b.expiryStatus !== 'MENDEKATI EXPIRED') continue;
+    const prod = productById.get(b.productId);
+    alerts.push({
+      id: `batch_${b.id}`,
+      source: 'batch',
+      productId: b.productId,
+      productName: prod?.name || b.productName,
+      productBrand: prod?.brand ?? b.productBrand,
+      productVariant: prod?.variant ?? b.productVariant,
+      baseUnit: prod?.unit || b.baseUnit,
+      remainingBaseQty: Number(b.remainingBaseQty) || 0,
+      batchId: b.id,
+      batchNumber: b.batchNumber,
+      sourceNumber: b.sourceNumber,
+      supplierName: b.supplierName,
+      startDate: b.startDate,
+      estimatedExpiryDate: b.estimatedExpiryDate,
+      effectiveExpiryDate: b.effectiveExpiryDate,
+      isActualPackagingDate: b.isActualPackagingDate,
+      daysRemaining: b.daysRemaining,
+      expiryStatus: b.expiryStatus,
+      remainingLabel: b.remainingLabel,
+      batch: b,
+      product: prod,
+    });
+  }
+
+  for (const p of products) {
+    if (!p.isActive) continue;
+    if (productsWithActiveBatches.has(p.id)) continue;
+    const resolved = resolveProductExpiryDates(p, referenceDateYmd);
+    if (!resolved.hasExplicitDates) continue;
+
+    const daysRemaining = calculateDaysRemaining(resolved.effectiveExpiryDate, referenceDateYmd);
+    const expiryStatus = getExpiryStatus(resolved.effectiveExpiryDate, referenceDateYmd);
+    if (expiryStatus !== 'EXPIRED' && expiryStatus !== 'MENDEKATI EXPIRED') continue;
+
+    alerts.push({
+      id: `product_${p.id}`,
+      source: 'product',
+      productId: p.id,
+      productName: p.name,
+      productBrand: p.brand,
+      productVariant: p.variant,
+      baseUnit: p.unit,
+      remainingBaseQty: Math.max(0, Number(p.stock) || 0),
+      startDate: resolved.inputDate,
+      estimatedExpiryDate: resolved.estimatedExpiryDate,
+      effectiveExpiryDate: resolved.effectiveExpiryDate,
+      isActualPackagingDate: resolved.isCustomExpiry,
+      daysRemaining,
+      expiryStatus,
+      remainingLabel: formatDaysRemainingLabel(daysRemaining),
+      product: p,
+    });
+  }
+
+  alerts.sort((a, b) => {
+    if (a.expiryStatus !== b.expiryStatus) {
+      return a.expiryStatus === 'EXPIRED' ? -1 : 1;
+    }
+    return a.effectiveExpiryDate.localeCompare(b.effectiveExpiryDate);
+  });
+
+  return alerts;
+}
+

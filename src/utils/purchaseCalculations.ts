@@ -30,6 +30,7 @@ export interface PurchaseDraftLineInput {
   unitCost: number;
   lineDiscount?: number;
   actualExpiryDate?: string;
+  sellPrice?: number;
 }
 
 export interface ComputedPurchaseLine {
@@ -51,6 +52,7 @@ export interface ComputedPurchaseLine {
   hppBefore: number;
   hppAfter: number;
   actualExpiryDate?: string;
+  sellPrice?: number;
 }
 
 export interface ComputedProductUpdate {
@@ -61,6 +63,7 @@ export interface ComputedProductUpdate {
   hppBefore: number;
   hppAfter: number;
   hppChanged: boolean;
+  newSellPrice?: number;
 }
 
 export interface ComputedPurchaseDraft {
@@ -96,6 +99,7 @@ export function computePurchaseDraft(
     lineDiscount: number;
     afterLineDiscount: number;
     actualExpiryDate?: string;
+    sellPrice?: number;
   }
 
   const prelim: PrelimLine[] = inputs.map((item, idx) => {
@@ -133,6 +137,11 @@ export function computePurchaseDraft(
       throw new Error(`Konversi jumlah satuan dasar untuk "${item.product.name}" tidak valid.`);
     }
 
+    const sellPriceNum =
+      item.sellPrice !== undefined && Number.isFinite(Number(item.sellPrice)) && Number(item.sellPrice) >= 0
+        ? roundMoney(Number(item.sellPrice))
+        : undefined;
+
     return {
       product: item.product,
       unitName: chosenUnit.unitName,
@@ -145,6 +154,7 @@ export function computePurchaseDraft(
       lineDiscount,
       afterLineDiscount,
       actualExpiryDate: item.actualExpiryDate,
+      sellPrice: sellPriceNum,
     };
   });
 
@@ -179,6 +189,7 @@ export function computePurchaseDraft(
       stock: number;
       costPrice: number;
       totalAddedBaseQty: number;
+      newSellPrice?: number;
     }
   >();
 
@@ -198,8 +209,11 @@ export function computePurchaseDraft(
         stock: startStock,
         costPrice: startCost,
         totalAddedBaseQty: 0,
+        newSellPrice: l.sellPrice,
       };
       runningByProduct.set(l.product.id, state);
+    } else if (l.sellPrice !== undefined) {
+      state.newSellPrice = l.sellPrice;
     }
 
     const stockBefore = snapStockToProductPrecision(state.stock, l.product);
@@ -243,6 +257,7 @@ export function computePurchaseDraft(
       hppBefore,
       hppAfter,
       actualExpiryDate: l.actualExpiryDate,
+      sellPrice: l.sellPrice,
     };
   });
 
@@ -254,6 +269,7 @@ export function computePurchaseDraft(
     hppBefore: st.initialCost,
     hppAfter: st.costPrice,
     hppChanged: Math.abs(st.costPrice - st.initialCost) >= 0.0001,
+    newSellPrice: st.newSellPrice,
   }));
 
   return {

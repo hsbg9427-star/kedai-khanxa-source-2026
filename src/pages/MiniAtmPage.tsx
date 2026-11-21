@@ -31,12 +31,16 @@ import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
 import type {
   Account,
+  Customer,
   MiniAtmFeeAudit,
   MiniAtmFeeTier,
   MiniAtmPaymentChannel,
   MiniAtmTransaction,
+  ServicePaymentStatus,
   StoreSetting,
 } from '../types/database';
+import { CustomerBonCombobox } from '../components/CustomerBonCombobox';
+import { resolvePosCustomerMatch } from '../utils/qrisFee';
 import {
   recordMiniAtmTransaction,
   saveMiniAtmSettings,
@@ -74,12 +78,13 @@ import {
 
 interface MiniAtmPageProps {
   accounts: Account[];
+  customers: Customer[];
   storeSetting: StoreSetting | null;
 }
 
 type MiniAtmTab = 'transaksi' | 'riwayat' | 'laporan' | 'pengaturan';
 
-export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
+export function MiniAtmPage({ accounts, customers, storeSetting }: MiniAtmPageProps) {
   const { user, profile, isAdmin } = useAuth();
   const { isOnline } = useNetwork();
 
@@ -107,7 +112,11 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
   const [transferVerified, setTransferVerified] = useState(false);
   const [bankName, setBankName] = useState('QRIS Merchant');
   const [targetAccountNumber, setTargetAccountNumber] = useState('');
-  const [customerName, setCustomerName] = useState('');
+  const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const [customerInput, setCustomerInput] = useState('');
+  const [newCustomerPhone, setNewCustomerPhone] = useState('');
+  const [paymentStatus, setPaymentStatus] = useState<ServicePaymentStatus>('paid');
+  const [paidAmount, setPaidAmount] = useState('0');
   const [externalReferenceNumber, setExternalReferenceNumber] = useState('');
   const [transferProofDataUrl, setTransferProofDataUrl] = useState('');
   const [uploadingProof, setUploadingProof] = useState(false);
@@ -250,13 +259,22 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
     };
   }, [isAdmin, user]);
 
-  // Sinkronkan kanal pembayaran Tarik Tunai (default QRIS jika diizinkan Admin)
+  // Sinkronkan kanal pembayaran Tarik Tunai (QRIS hanya untuk Lunas dan jika diizinkan Admin)
   useEffect(() => {
-    if (serviceType !== 'tarik_tunai' || !miniAtmSettings.allowQrisTarikTunai) {
+    if (
+      serviceType !== 'tarik_tunai' ||
+      !miniAtmSettings.allowQrisTarikTunai ||
+      paymentStatus === 'debt'
+    ) {
       setPaymentChannel('bank_transfer');
       setQrisVerified(false);
     }
-  }, [serviceType, miniAtmSettings.allowQrisTarikTunai]);
+  }, [serviceType, miniAtmSettings.allowQrisTarikTunai, paymentStatus]);
+
+  const customerMatch = useMemo(
+    () => resolvePosCustomerMatch(customers, customerInput, selectedCustomerId || undefined),
+    [customers, customerInput, selectedCustomerId]
+  );
 
   // Resolve standard fees automatically based on nominal, service, & bank
   const standardFeeInfo = useMemo(() => {
@@ -292,7 +310,9 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
     try {
       return calculateMiniAtmBreakdown({
         serviceType,
-        paymentChannel,
+        paymentChannel: paymentStatus === 'debt' ? 'bank_transfer' : paymentChannel,
+        paymentStatus,
+        paidAmount: paymentStatus === 'debt' ? Math.max(0, Number(paidAmount) || 0) : undefined,
         allowQrisTarikTunai: true,
         qrisVerified: true,
         qrisMdrRate: miniAtmSettings.qrisMdrPercent,
@@ -305,7 +325,16 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
     } catch {
       return null;
     }
-  }, [serviceType, paymentChannel, miniAtmSettings, principalAmount, appliedAdminFee, appliedBankFee]);
+  }, [
+    serviceType,
+    paymentChannel,
+    paymentStatus,
+    paidAmount,
+    miniAtmSettings,
+    principalAmount,
+    appliedAdminFee,
+    appliedBankFee,
+  ]);
 
   const todayStats = useMemo(() => {
     const rows = transactions.filter(
@@ -432,7 +461,10 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
       return;
     }
 
-    if (serviceType === 'tarik_tunai' && paymentChannel === 'qris') {
+    const effectiveChannel: MiniAtmPaymentChannel =
+      serviceType === 'tarik_tunai' && paymentStatus !== 'debt' ? paymentChannel : 'bank_transfer';
+
+    if (serviceType === 'tarik_tunai' && effectiveChannel === 'qris') {
       if (!miniAtmSettings.allowQrisTarikTunai) {
         setFeedback({
           kind: 'err',
@@ -457,6 +489,25 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
       return;
     }
 
+    if (paymentStatus === 'debt' && !customerMatch.matchedCustomer && !customerMatch.isNewCustomer) {
+      setFeedback({
+        kind: 'err',
+        text: 'Pilih atau ketik nama pelanggan terlebih dahulu untuk transaksi Mini ATM berstatus Hutang (Bon).',
+      });
+      return;
+    }
+
+    const numPrincipal = Math.max(0, Number(principalAmount) || 0);
+    const numTotalDue = numPrincipal + appliedAdminFee;
+    const numPaidDp = paymentStatus === 'debt' ? Math.max(0, Number(paidAmount) || 0) : numTotalDue;
+    if (paymentStatus === 'debt' && numTotalDue > 0 && numPaidDp >= numTotalDue) {
+      setFeedback({
+        kind: 'err',
+        text: 'Nominal DP sudah menutup seluruh tagihan. Pilih status pembayaran Lunas.',
+      });
+      return;
+    }
+
     submitLockRef.current = true;
     setSaving(true);
 
@@ -464,19 +515,24 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
       const result = await recordMiniAtmTransaction(
         {
           serviceType,
-          paymentChannel: serviceType === 'tarik_tunai' ? paymentChannel : 'bank_transfer',
+          paymentChannel: effectiveChannel,
+          paymentStatus,
+          paidAmount: paymentStatus === 'debt' ? numPaidDp : undefined,
           allowQrisTarikTunai: miniAtmSettings.allowQrisTarikTunai,
-          qrisVerified: serviceType === 'tarik_tunai' && paymentChannel === 'qris' ? qrisVerified : false,
+          qrisVerified: serviceType === 'tarik_tunai' && effectiveChannel === 'qris' ? qrisVerified : false,
           transferVerified: serviceType === 'transfer' ? transferVerified : false,
           qrisMdrRate: miniAtmSettings.qrisMdrPercent,
           qrisInternalExtraThreshold: miniAtmSettings.qrisInternalExtraThreshold,
           qrisInternalExtraFee: miniAtmSettings.qrisInternalExtraFee,
           bankName,
           targetAccountNumber,
-          customerName,
+          customer: customerMatch.matchedCustomer,
+          customerName: customerInput,
+          autoCreateCustomer: customerMatch.isNewCustomer,
+          newCustomerPhone,
           externalReferenceNumber,
           transferProofDataUrl,
-          principalAmount: Number(principalAmount) || 0,
+          principalAmount: numPrincipal,
           adminFee: appliedAdminFee,
           bankFee: appliedBankFee,
           standardAdminFee: standardFeeInfo.standardAdminFee,
@@ -492,17 +548,30 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
         }
       );
 
+      const bonSuffix =
+        result.debtAmount > 0
+          ? ` Masuk Bon ${result.customerName || ''}: ${formatRupiah(result.debtAmount)}${
+              result.customerDebtAfter !== undefined
+                ? ` (Total Bon: ${formatRupiah(result.customerDebtAfter)})`
+                : ''
+            }.`
+          : '';
+
       setFeedback({
         kind: 'ok',
         text: isAdmin
           ? `Transaksi Mini ATM ${result.transactionNumber} berhasil dicatat. Laba bersih: ${formatRupiah(
               result.netProfit
-            )}.`
-          : `Transaksi Mini ATM ${result.transactionNumber} berhasil dicatat.`,
+            )}.${bonSuffix}`
+          : `Transaksi Mini ATM ${result.transactionNumber} berhasil dicatat.${bonSuffix}`,
       });
       setPrincipalAmount('');
       setTargetAccountNumber('');
-      setCustomerName('');
+      setSelectedCustomerId('');
+      setCustomerInput('');
+      setNewCustomerPhone('');
+      setPaymentStatus('paid');
+      setPaidAmount('0');
       setExternalReferenceNumber('');
       setTransferProofDataUrl('');
       setNotes('');
@@ -523,10 +592,15 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
     setFeedback(null);
     setVoidingId(txDoc.id);
     try {
-      await voidMiniAtmTransaction(txDoc, accounts, {
-        uid: user.uid,
-        displayName: profile?.displayName || user.displayName || 'Admin',
-      });
+      await voidMiniAtmTransaction(
+        txDoc,
+        accounts,
+        {
+          uid: user.uid,
+          displayName: profile?.displayName || user.displayName || 'Admin',
+        },
+        customers
+      );
       setFeedback({
         kind: 'ok',
         text: `Transaksi ${txDoc.transactionNumber} berhasil dibatalkan (Void) dan saldo kas/bank telah dikembalikan.`,
@@ -832,7 +906,11 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                           setFeeOverrideReason('');
                           setQrisVerified(false);
                           setTransferVerified(false);
-                          if (opt.id === 'tarik_tunai' && miniAtmSettings.allowQrisTarikTunai) {
+                          if (
+                            opt.id === 'tarik_tunai' &&
+                            miniAtmSettings.allowQrisTarikTunai &&
+                            paymentStatus !== 'debt'
+                          ) {
                             setPaymentChannel('qris');
                             setBankName('QRIS Merchant');
                           } else {
@@ -870,14 +948,14 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      disabled={!miniAtmSettings.allowQrisTarikTunai}
+                      disabled={!miniAtmSettings.allowQrisTarikTunai || paymentStatus === 'debt'}
                       onClick={() => {
                         setPaymentChannel('qris');
                         setManualBankAccountTouched(false);
                         setBankName('QRIS Merchant');
                       }}
                       className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-semibold inline-flex items-center justify-center gap-1.5 ${
-                        !miniAtmSettings.allowQrisTarikTunai
+                        !miniAtmSettings.allowQrisTarikTunai || paymentStatus === 'debt'
                           ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
                           : paymentChannel === 'qris'
                           ? 'bg-white border-emerald-600 text-emerald-800 shadow-sm cursor-pointer'
@@ -901,15 +979,22 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                           : 'bg-white/60 border-slate-200 text-slate-600 hover:bg-white'
                       }`}
                     >
-                      Kartu / Transfer Bank
+                      {paymentStatus === 'debt' ? 'Non-QRIS (Kasbon)' : 'Kartu / Transfer Bank'}
                     </button>
                   </div>
 
-                  {!miniAtmSettings.allowQrisTarikTunai && (
-                    <p className="text-[11px] text-amber-700">
-                      QRIS Tarik Tunai dinonaktifkan Admin. Aktifkan di Pengaturan &amp; Audit
-                      sesuai ketentuan penyedia QRIS resmi.
+                  {paymentStatus === 'debt' ? (
+                    <p className="text-[11px] text-amber-800">
+                      Pembayaran QRIS hanya untuk transaksi Lunas. Untuk Kasbon Tarik Tunai,
+                      transaksi diproses lewat jalur Non-QRIS dan dicatat ke Bon Pelanggan.
                     </p>
+                  ) : (
+                    !miniAtmSettings.allowQrisTarikTunai && (
+                      <p className="text-[11px] text-amber-700">
+                        QRIS Tarik Tunai dinonaktifkan Admin. Aktifkan di Pengaturan &amp; Audit
+                        sesuai ketentuan penyedia QRIS resmi.
+                      </p>
+                    )
                   )}
 
                   {paymentChannel === 'qris' && miniAtmSettings.allowQrisTarikTunai && (
@@ -1003,8 +1088,8 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                 </div>
               </div>
 
-              {/* Rekening Tujuan & Nama Penerima */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Rekening Tujuan & Pelanggan (Otomatis Terdaftar) */}
+              <div className="space-y-3">
                 <div className="space-y-1">
                   <label htmlFor="atm-target" className="block text-xs font-medium text-slate-700">
                     {serviceType === 'transfer'
@@ -1023,23 +1108,107 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                   />
                 </div>
 
-                <div className="space-y-1">
-                  <label htmlFor="atm-cust" className="block text-xs font-medium text-slate-700">
-                    {serviceType === 'transfer' ? 'Nama Penerima *' : 'Nama Pelanggan (Opsional)'}
-                  </label>
-                  <input
-                    id="atm-cust"
-                    type="text"
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    required={serviceType === 'transfer'}
-                    maxLength={100}
-                    placeholder={
-                      serviceType === 'transfer' ? 'Nama pemilik rekening tujuan' : 'Nama pelanggan'
-                    }
-                    className="w-full min-h-[44px] px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                  />
+                <CustomerBonCombobox
+                  customers={customers}
+                  selectedCustomerId={selectedCustomerId}
+                  customerInput={customerInput}
+                  newCustomerPhone={newCustomerPhone}
+                  onSelectCustomer={(id, name) => {
+                    setSelectedCustomerId(id);
+                    setCustomerInput(name);
+                    setNewCustomerPhone('');
+                  }}
+                  onChangeInput={(nextText) => {
+                    setCustomerInput(nextText);
+                    setSelectedCustomerId('');
+                  }}
+                  onChangeNewPhone={setNewCustomerPhone}
+                  onClear={() => {
+                    setSelectedCustomerId('');
+                    setCustomerInput('');
+                    setNewCustomerPhone('');
+                  }}
+                  label={
+                    paymentStatus === 'debt'
+                      ? 'Pelanggan / Penerima (Wajib untuk Hutang)'
+                      : serviceType === 'transfer'
+                      ? 'Nama Penerima / Pelanggan *'
+                      : 'Pelanggan (Opsional / Otomatis Terdaftar)'
+                  }
+                  placeholder={
+                    serviceType === 'transfer'
+                      ? 'Ketik nama baru / pilih pelanggan...'
+                      : 'Ketik nama baru atau cari pelanggan...'
+                  }
+                  required={serviceType === 'transfer' || paymentStatus === 'debt'}
+                  isDebtMode={paymentStatus === 'debt'}
+                />
+              </div>
+
+              {/* Status Pembayaran: Lunas vs Hutang (Bon) */}
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2.5">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Status Pembayaran Pelanggan
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPaymentStatus('paid');
+                      setPaidAmount('0');
+                    }}
+                    className={`min-h-[40px] px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                      paymentStatus === 'paid'
+                        ? 'bg-emerald-700 border-emerald-700 text-white'
+                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    Lunas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPaymentStatus('debt');
+                      if (serviceType === 'tarik_tunai' && paymentChannel === 'qris') {
+                        setPaymentChannel('bank_transfer');
+                        setQrisVerified(false);
+                        setManualBankAccountTouched(false);
+                        if (bankName.toLowerCase().includes('qris')) {
+                          setBankName('Kas / Non-QRIS');
+                        }
+                      }
+                    }}
+                    className={`min-h-[40px] px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                      paymentStatus === 'debt'
+                        ? 'bg-amber-600 border-amber-600 text-white'
+                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    Hutang / Bon
+                  </button>
                 </div>
+
+                {paymentStatus === 'debt' && (
+                  <div className="space-y-1.5 pt-1 border-t border-slate-200">
+                    <label htmlFor="atm-paid-dp" className="block text-xs font-medium text-slate-700">
+                      Dibayar Sekarang / DP (Rp)
+                    </label>
+                    <input
+                      id="atm-paid-dp"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={paidAmount}
+                      onChange={(e) => setPaidAmount(e.target.value)}
+                      placeholder="0"
+                      className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-amber-300 bg-white text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                    <p className="text-[11px] text-amber-800">
+                      Isi <strong>0</strong> jika bon penuh. Sisa otomatis digabung dengan bon Kasir
+                      &amp; PPOB pelanggan.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Nominal Pokok */}
@@ -1314,7 +1483,7 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                     <span className="text-slate-600">
                       {serviceType === 'tarik_tunai'
                         ? 'Uang Diberikan ke Pelanggan'
-                        : 'Total Dibayar Pelanggan'}
+                        : 'Total Tagihan Pelanggan'}
                     </span>
                     <span className="font-mono-num font-bold text-sm text-slate-900">
                       {formatRupiah(previewBreakdown.customerTotal)}
@@ -1326,6 +1495,40 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                       {formatRupiah(previewBreakdown.adminFee)}
                     </span>
                   </div>
+
+                  {previewBreakdown.paymentStatus === 'debt' && (
+                    <>
+                      <div className="pt-1 border-t border-slate-200 flex justify-between items-center">
+                        <span className="text-slate-600">Total Tagihan Bon (Pokok + Jasa)</span>
+                        <span className="font-mono-num font-semibold text-slate-900">
+                          {formatRupiah(previewBreakdown.totalDue)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-600">Dibayar Sekarang (DP)</span>
+                        <span className="font-mono-num font-semibold text-emerald-700">
+                          {formatRupiah(previewBreakdown.paidAmount)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center font-semibold text-amber-800">
+                        <span>Masuk Bon / Piutang Pelanggan</span>
+                        <span className="font-mono-num">
+                          +{formatRupiah(previewBreakdown.debtAmount)}
+                        </span>
+                      </div>
+                      {customerMatch.matchedCustomer && (
+                        <div className="flex justify-between items-center text-[11px] text-amber-900 bg-amber-50 px-2 py-1 rounded border border-amber-200">
+                          <span>Total Gabungan Bon Nanti</span>
+                          <span className="font-mono-num font-bold">
+                            {formatRupiah(
+                              (Number(customerMatch.matchedCustomer.totalDebt) || 0) +
+                                previewBreakdown.debtAmount
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  )}
 
                   {isAdmin && (
                     <>
@@ -1463,7 +1666,7 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                             </div>
                           </td>
                           <td className="py-3 px-4">
-                            <div className="inline-flex items-center gap-1.5 font-medium text-slate-900 text-xs">
+                            <div className="inline-flex flex-wrap items-center gap-1.5 font-medium text-slate-900 text-xs">
                               {tx.serviceType === 'tarik_tunai' ? (
                                 <ArrowUpRight className="w-3.5 h-3.5 text-red-600 shrink-0" />
                               ) : (
@@ -1475,6 +1678,15 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                               {tx.paymentChannel === 'qris' && (
                                 <span className="px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[10px] font-semibold text-emerald-800">
                                   QRIS
+                                </span>
+                              )}
+                              {tx.paymentStatus === 'debt' ? (
+                                <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-300 text-[10px] font-semibold text-amber-900 font-mono-num">
+                                  HUTANG (Bon {formatRupiah(tx.debtAmount ?? tx.principalAmount + tx.adminFee)})
+                                </span>
+                              ) : (
+                                <span className="px-1.5 py-0.5 rounded bg-slate-50 border border-slate-200 text-[10px] font-medium text-slate-600">
+                                  LUNAS
                                 </span>
                               )}
                               {tx.feeOverridden && (
@@ -1652,6 +1864,15 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                             {tx.paymentChannel === 'qris' && (
                               <span className="px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[10px] font-semibold text-emerald-800">
                                 QRIS ({tx.qrisMdrRate ?? 0.3}%)
+                              </span>
+                            )}
+                            {tx.paymentStatus === 'debt' ? (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-300 text-[10px] font-semibold text-amber-900 font-mono-num">
+                                HUTANG (Bon {formatRupiah(tx.debtAmount ?? tx.principalAmount + tx.adminFee)})
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded bg-slate-50 border border-slate-200 text-[10px] font-medium text-slate-600">
+                                LUNAS
                               </span>
                             )}
                             {tx.feeOverridden && (
@@ -2499,8 +2720,8 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
 
       {/* Modal Bukti Transfer */}
       {proofModalTx && proofModalTx.transferProofDataUrl && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-5 space-y-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md max-h-[90dvh] overflow-y-auto p-5 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div>
                 <h4 className="font-display font-bold text-sm text-slate-900">
@@ -2535,8 +2756,8 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
 
       {/* Modal Struk Mini ATM */}
       {receiptTx && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-5 space-y-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md max-h-[90dvh] overflow-y-auto p-5 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div>
                 <h4 className="font-display font-bold text-base text-slate-900">
@@ -2630,7 +2851,7 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                 <span>
                   {receiptTx.serviceType === 'tarik_tunai'
                     ? 'Tunai Diterima Pelanggan'
-                    : 'Total Dibayar Pelanggan'}
+                    : 'Total Tagihan Pelanggan'}
                 </span>
                 <span className="font-mono-num">
                   {formatRupiah(
@@ -2640,6 +2861,48 @@ export function MiniAtmPage({ accounts, storeSetting }: MiniAtmPageProps) {
                   )}
                 </span>
               </div>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-600">Status Pembayaran</span>
+                <span
+                  className={`font-semibold px-2 py-0.5 rounded text-[11px] ${
+                    receiptTx.paymentStatus === 'debt'
+                      ? 'bg-amber-100 text-amber-900'
+                      : 'bg-emerald-100 text-emerald-800'
+                  }`}
+                >
+                  {receiptTx.paymentStatus === 'debt' ? 'HUTANG (BON)' : 'LUNAS'}
+                </span>
+              </div>
+              {receiptTx.paymentStatus === 'debt' && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Total Tagihan Bon (Pokok + Jasa)</span>
+                    <span className="font-mono-num text-slate-900">
+                      {formatRupiah(receiptTx.principalAmount + receiptTx.adminFee)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Dibayar (DP)</span>
+                    <span className="font-mono-num text-slate-900">
+                      {formatRupiah(receiptTx.paidAmount ?? 0)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between font-semibold text-amber-800">
+                    <span>Masuk Bon / Piutang</span>
+                    <span className="font-mono-num">
+                      {formatRupiah(
+                        receiptTx.debtAmount ??
+                          Math.max(
+                            0,
+                            receiptTx.principalAmount +
+                              receiptTx.adminFee -
+                              (receiptTx.paidAmount ?? 0)
+                          )
+                      )}
+                    </span>
+                  </div>
+                </>
+              )}
               {isAdmin && (receiptTx.qrisMdrAmount || 0) > 0 && (
                 <div className="pt-1 text-[11px] text-amber-800 flex justify-between">
                   <span>Potongan MDR QRIS Merchant</span>

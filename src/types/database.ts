@@ -140,6 +140,8 @@ export interface Product {
   sellUnits?: ProductSellUnit[]; // satuan tambahan (SLOP, BATANG, KG, KARUNG, LITER, DUS, RAK, dll)
   stock: number; // selalu disimpan dalam satuan dasar
   minStock: number;
+  inputDate?: string; // YYYY-MM-DD tanggal input stok/produk
+  expiryDate?: string; // YYYY-MM-DD tanggal kedaluwarsa aktif (otomatis +6 bulan atau aktual kemasan)
   isActive: boolean;
   createdByUid: string;
   createdAt: Timestamp;
@@ -260,6 +262,9 @@ export interface Sale extends TransactionMetadata {
   expiredOverrideByUid?: string;
   expiredOverrideByName?: string;
   expiredOverrideReason?: string;
+  receivablePaidAmount?: number;
+  customerDebtBefore?: number;
+  customerDebtAfter?: number;
   status: 'completed' | 'void';
   createdAt: Timestamp;
   updatedAt: Timestamp;
@@ -391,6 +396,8 @@ export interface Customer {
   updatedAt: Timestamp;
 }
 
+export type ReceivableSourceType = 'sale' | 'ppob' | 'mini_atm' | 'manual';
+
 export interface Receivable extends TransactionMetadata {
   id: string;
   customerId: string;
@@ -398,11 +405,15 @@ export interface Receivable extends TransactionMetadata {
   type: 'debt' | 'payment';
   amount: number;
   balanceAfter: number;
+  sourceType?: ReceivableSourceType;
+  referenceId?: string;
   saleId?: string;
   accountId?: string;
   notes?: string;
   createdAt: Timestamp;
 }
+
+export type ServicePaymentStatus = 'paid' | 'debt';
 
 export type MiniAtmPaymentChannel = 'bank_transfer' | 'qris';
 
@@ -454,12 +465,16 @@ export interface MiniAtmTransaction extends TransactionMetadata {
   id: string;
   serviceType: 'tarik_tunai' | 'transfer' | 'setor_tunai';
   paymentChannel?: MiniAtmPaymentChannel;
+  paymentStatus?: ServicePaymentStatus;
   bankName: string;
   targetAccountNumber?: string;
+  customerId?: string;
   customerName?: string;
   principalAmount: number;
   adminFee: number;
   bankFee: number;
+  paidAmount?: number;
+  debtAmount?: number;
   qrisVerified?: boolean;
   transferVerified?: boolean;
   qrisMdrRate?: number;
@@ -485,10 +500,14 @@ export interface PpobTransaction extends TransactionMetadata {
   category: 'pulsa' | 'paket_data' | 'pln' | 'pdam' | 'bpjs' | 'ewallet' | 'lainnya';
   providerName: string;
   targetNumber: string;
+  customerId?: string;
   customerName?: string;
+  paymentStatus?: ServicePaymentStatus;
   capitalPrice: number;
   sellPrice: number;
   adminFee: number;
+  paidAmount?: number;
+  debtAmount?: number;
   netProfit: number;
   accountId: string;
   cashAccountId?: string;
@@ -507,6 +526,8 @@ export interface Loan extends TransactionMetadata {
   principalAmount: number;
   paidAmount: number;
   remainingAmount: number;
+  adminFee?: number; // Target / kesepakatan biaya admin fleksibel (0 / kosong = tentukan saat/setelah pelunasan)
+  adminFeePaid?: number; // Total biaya admin yang sudah dibayar
   sourceAccountId: string;
   sourceAccountName: string;
   sourceAccountType: AccountType;
@@ -521,7 +542,9 @@ export interface LoanPayment extends TransactionMetadata {
   loanId: string;
   loanNumber: string;
   borrowerName: string;
-  amount: number;
+  amount: number; // Total uang masuk (principalPaid + adminFeePaid)
+  principalPaid?: number; // Porsi pelunasan/cicilan pokok
+  adminFeePaid?: number; // Porsi pembayaran biaya admin pinjaman
   remainingBefore: number;
   remainingAfter: number;
   accountId: string;
@@ -639,6 +662,17 @@ export interface BarcodeLock {
 export type CashierClosingStatus = 'balance' | 'short' | 'over';
 export type CashierClosingReviewStatus = 'pending' | 'verified' | 'flagged';
 
+export interface DigitalAccountAdjustment {
+  accountId: string;
+  accountName: string;
+  accountType: string;
+  expectedBalance: number;
+  realBalance: number;
+  variance: number;
+  applyAdjustment: boolean;
+  adjustmentDescription?: string;
+}
+
 export interface CashierClosing extends TransactionMetadata {
   id: string;
   shiftLabel?: string;
@@ -665,6 +699,9 @@ export interface CashierClosing extends TransactionMetadata {
   actualCash: number;
   varianceAmount: number;
   status: CashierClosingStatus;
+  applyAdjustment?: boolean;
+  adjustmentDescription?: string;
+  digitalAdjustments?: DigitalAccountAdjustment[];
   notes?: string;
   isFinalized: boolean;
   reviewStatus: CashierClosingReviewStatus;

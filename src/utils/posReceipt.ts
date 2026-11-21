@@ -133,21 +133,52 @@ export function formatPosReceiptText(
   if (receipt.discount > 0) {
     lines.push(...formatRow('Diskon', `-${formatPlainRp(receipt.discount)}`, RECEIPT_WIDTH));
   }
-  lines.push(...formatRow('TOTAL', formatPlainRp(receipt.totalAmount), RECEIPT_WIDTH));
+  const recPaid = Number(receipt.receivablePaidAmount) || 0;
+  const grandDue = receipt.totalAmount + recPaid;
+
+  lines.push(...formatRow('TOTAL BELANJA', formatPlainRp(receipt.totalAmount), RECEIPT_WIDTH));
+  if (recPaid > 0) {
+    lines.push(...formatRow('Bayar Piutang', formatPlainRp(recPaid), RECEIPT_WIDTH));
+    lines.push(...formatRow('TOTAL BAYAR', formatPlainRp(grandDue), RECEIPT_WIDTH));
+  }
   lines.push(dashDivider);
 
   const methodLabel = getPaymentMethodLabel(receipt.paymentMethod);
   if (receipt.debtAmount > 0) {
     lines.push(...formatRow('Metode', methodLabel, RECEIPT_WIDTH));
     lines.push(...formatRow('Dibayar (DP)', formatPlainRp(receipt.paidAmount), RECEIPT_WIDTH));
-    lines.push(...formatRow('Sisa Kasbon', formatPlainRp(receipt.debtAmount), RECEIPT_WIDTH));
+    lines.push(...formatRow('Kasbon Baru', formatPlainRp(receipt.debtAmount), RECEIPT_WIDTH));
+    if (receipt.customerDebtAfter !== undefined) {
+      lines.push(...formatRow('Total Piutang', formatPlainRp(receipt.customerDebtAfter), RECEIPT_WIDTH));
+    }
   } else {
     lines.push(...formatRow(`Bayar (${methodLabel})`, formatPlainRp(receipt.paidAmount), RECEIPT_WIDTH));
     if (receipt.paymentMethod === 'mixed') {
-      lines.push(...formatRow('  - Tunai', formatPlainRp(receipt.cashPaidPart), RECEIPT_WIDTH));
-      lines.push(...formatRow('  - QRIS', formatPlainRp(receipt.qrisAmount), RECEIPT_WIDTH));
+      lines.push(
+        ...formatRow(
+          recPaid > 0 ? '  - Tunai Belanja' : '  - Tunai',
+          formatPlainRp(receipt.cashPaidPart),
+          RECEIPT_WIDTH
+        )
+      );
+      lines.push(
+        ...formatRow(
+          recPaid > 0 ? '  - QRIS Belanja' : '  - QRIS',
+          formatPlainRp(receipt.qrisAmount),
+          RECEIPT_WIDTH
+        )
+      );
     }
     lines.push(...formatRow('Kembali', formatPlainRp(receipt.changeAmount), RECEIPT_WIDTH));
+    if (receipt.customerDebtAfter !== undefined && (recPaid > 0 || (receipt.customerDebtBefore || 0) > 0)) {
+      lines.push(
+        ...formatRow(
+          'Sisa Piutang',
+          receipt.customerDebtAfter <= 0 ? 'LUNAS (Rp0)' : formatPlainRp(receipt.customerDebtAfter),
+          RECEIPT_WIDTH
+        )
+      );
+    }
   }
 
   lines.push(eqDivider);
@@ -233,20 +264,39 @@ export function formatWhatsAppReceiptMessage(
   if (receipt.discount > 0) {
     lines.push(`Diskon   : -${formatRupiah(receipt.discount)}`);
   }
-  lines.push(`*TOTAL    : ${formatRupiah(receipt.totalAmount)}*`);
+  const recPaidWa = Number(receipt.receivablePaidAmount) || 0;
+  const grandDueWa = receipt.totalAmount + recPaidWa;
+
+  lines.push(`*Belanja  : ${formatRupiah(receipt.totalAmount)}*`);
+  if (recPaidWa > 0) {
+    lines.push(`Bayar Piutang : ${formatRupiah(recPaidWa)}`);
+    lines.push(`*TOTAL BAYAR   : ${formatRupiah(grandDueWa)}*`);
+  }
   lines.push(`Metode   : ${methodLabel}`);
 
   if (receipt.debtAmount > 0) {
     lines.push(`Dibayar (DP) : ${formatRupiah(receipt.paidAmount)}`);
-    lines.push(`*Sisa Kasbon  : ${formatRupiah(receipt.debtAmount)}*`);
+    lines.push(`*Kasbon Baru  : ${formatRupiah(receipt.debtAmount)}*`);
+    if (receipt.customerDebtAfter !== undefined) {
+      lines.push(`*Total Piutang: ${formatRupiah(receipt.customerDebtAfter)}*`);
+    }
   } else {
     lines.push(`Dibayar  : ${formatRupiah(receipt.paidAmount)}`);
     if (receipt.paymentMethod === 'mixed') {
       lines.push(
-        `  (Tunai ${formatRupiah(receipt.cashPaidPart)} + QRIS ${formatRupiah(receipt.qrisAmount)})`
+        `  (${recPaidWa > 0 ? 'Belanja: ' : ''}Tunai ${formatRupiah(
+          receipt.cashPaidPart
+        )} + QRIS ${formatRupiah(receipt.qrisAmount)})`
       );
     }
     lines.push(`Kembali  : ${formatRupiah(receipt.changeAmount)}`);
+    if (receipt.customerDebtAfter !== undefined && (recPaidWa > 0 || (receipt.customerDebtBefore || 0) > 0)) {
+      lines.push(
+        `*Sisa Piutang : ${
+          receipt.customerDebtAfter <= 0 ? 'LUNAS (Rp0)' : formatRupiah(receipt.customerDebtAfter)
+        }*`
+      );
+    }
   }
 
   lines.push('--------------------------------');
@@ -356,10 +406,30 @@ export function formatMiniAtmReceiptText(
 
   const totalFinal =
     tx.serviceType === 'tarik_tunai'
-      ? Math.max(0, tx.principalAmount - (tx.internalExtraFee || 0))
+      ? tx.paymentStatus === 'debt'
+        ? tx.principalAmount + tx.adminFee
+        : Math.max(0, tx.principalAmount - (tx.internalExtraFee || 0))
       : tx.principalAmount + tx.adminFee;
-  const totalLabel = tx.serviceType === 'tarik_tunai' ? 'TUNAI DITERIMA' : 'TOTAL BAYAR';
+  const totalLabel =
+    tx.serviceType === 'tarik_tunai'
+      ? tx.paymentStatus === 'debt'
+        ? 'TOTAL TAGIHAN'
+        : 'TUNAI DITERIMA'
+      : 'TOTAL BAYAR';
   lines.push(...formatRow(totalLabel, formatPlainRp(totalFinal), RECEIPT_WIDTH));
+
+  const isDebt = tx.paymentStatus === 'debt' || (Number(tx.debtAmount) || 0) > 0;
+  lines.push(...formatRow('Status Bayar', isDebt ? 'HUTANG (BON)' : 'LUNAS', RECEIPT_WIDTH));
+  if (isDebt) {
+    lines.push(...formatRow('Dibayar (DP)', formatPlainRp(Number(tx.paidAmount) || 0), RECEIPT_WIDTH));
+    lines.push(
+      ...formatRow(
+        'Masuk Bon',
+        formatPlainRp(Number(tx.debtAmount) || Math.max(0, totalFinal - (Number(tx.paidAmount) || 0))),
+        RECEIPT_WIDTH
+      )
+    );
+  }
 
   if (tx.notes) {
     lines.push(dashDivider);
@@ -413,7 +483,7 @@ export function formatPpobReceiptText(
   lines.push(...formatRow('ID/Tujuan', tx.targetNumber, RECEIPT_WIDTH));
   lines.push(
     ...formatRow(
-      'Status',
+      'Status Trx',
       tx.status === 'completed' ? 'SUKSES' : tx.status === 'pending' ? 'PENDING' : 'GAGAL',
       RECEIPT_WIDTH
     )
@@ -426,13 +496,21 @@ export function formatPpobReceiptText(
   lines.push(dashDivider);
   lines.push(...formatRow('Harga', formatPlainRp(tx.sellPrice), RECEIPT_WIDTH));
   lines.push(...formatRow('Biaya Admin', formatPlainRp(tx.adminFee), RECEIPT_WIDTH));
-  lines.push(
-    ...formatRow(
-      'TOTAL BAYAR',
-      formatPlainRp(Number(tx.sellPrice) + Number(tx.adminFee)),
-      RECEIPT_WIDTH
-    )
-  );
+  const totalPpob = Number(tx.sellPrice) + Number(tx.adminFee);
+  lines.push(...formatRow('TOTAL TAGIHAN', formatPlainRp(totalPpob), RECEIPT_WIDTH));
+
+  const isDebt = tx.paymentStatus === 'debt' || (Number(tx.debtAmount) || 0) > 0;
+  lines.push(...formatRow('Status Bayar', isDebt ? 'HUTANG (BON)' : 'LUNAS', RECEIPT_WIDTH));
+  if (isDebt) {
+    lines.push(...formatRow('Dibayar (DP)', formatPlainRp(Number(tx.paidAmount) || 0), RECEIPT_WIDTH));
+    lines.push(
+      ...formatRow(
+        'Masuk Bon',
+        formatPlainRp(Number(tx.debtAmount) || Math.max(0, totalPpob - (Number(tx.paidAmount) || 0))),
+        RECEIPT_WIDTH
+      )
+    );
+  }
 
   lines.push(eqDivider);
   lines.push(...centerLines(thankYou, RECEIPT_WIDTH));

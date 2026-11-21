@@ -16,7 +16,15 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
-import type { Account, PpobTransaction, StoreSetting } from '../types/database';
+import type {
+  Account,
+  Customer,
+  PpobTransaction,
+  ServicePaymentStatus,
+  StoreSetting,
+} from '../types/database';
+import { CustomerBonCombobox } from '../components/CustomerBonCombobox';
+import { resolvePosCustomerMatch } from '../utils/qrisFee';
 import {
   completePendingPpobTransaction,
   failAndRefundPpobTransaction,
@@ -41,10 +49,11 @@ import {
 
 interface PpobPageProps {
   accounts: Account[];
+  customers: Customer[];
   storeSetting: StoreSetting | null;
 }
 
-export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
+export function PpobPage({ accounts, customers, storeSetting }: PpobPageProps) {
   const { user, profile, isAdmin } = useAuth();
   const { isOnline } = useNetwork();
 
@@ -56,7 +65,11 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
   const [category, setCategory] = useState<PpobCategory>('pulsa');
   const [providerName, setProviderName] = useState('Telkomsel');
   const [targetNumber, setTargetNumber] = useState('');
-  const [customerName, setCustomerName] = useState('');
+  const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const [customerInput, setCustomerInput] = useState('');
+  const [newCustomerPhone, setNewCustomerPhone] = useState('');
+  const [paymentStatus, setPaymentStatus] = useState<ServicePaymentStatus>('paid');
+  const [paidAmount, setPaidAmount] = useState('0');
   const [capitalPrice, setCapitalPrice] = useState('');
   const [sellPrice, setSellPrice] = useState('');
   const [adminFee, setAdminFee] = useState('0');
@@ -139,6 +152,11 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
   const selectedDepositAccount = activeAccounts.find((a) => a.id === depositAccountId) || null;
   const selectedCashAccount = activeAccounts.find((a) => a.id === cashAccountId) || null;
 
+  const customerMatch = useMemo(
+    () => resolvePosCustomerMatch(customers, customerInput, selectedCustomerId || undefined),
+    [customers, customerInput, selectedCustomerId]
+  );
+
   const previewBreakdown = useMemo(() => {
     const cap = Number(capitalPrice) || 0;
     const sell = Number(sellPrice) || 0;
@@ -149,11 +167,13 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
         capitalPrice: Math.max(0, cap),
         sellPrice: Math.max(0, sell),
         adminFee: Math.max(0, adm),
+        paymentStatus,
+        paidAmount: paymentStatus === 'debt' ? Math.max(0, Number(paidAmount) || 0) : undefined,
       });
     } catch {
       return null;
     }
-  }, [capitalPrice, sellPrice, adminFee]);
+  }, [capitalPrice, sellPrice, adminFee, paymentStatus, paidAmount]);
 
   const todayDate = getTodayDateString();
   const todayStats = useMemo(() => {
@@ -201,6 +221,26 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
       return;
     }
 
+    if (paymentStatus === 'debt' && !customerMatch.matchedCustomer && !customerMatch.isNewCustomer) {
+      setFeedback({
+        kind: 'err',
+        text: 'Pilih atau ketik nama pelanggan terlebih dahulu untuk transaksi PPOB berstatus Hutang (Bon).',
+      });
+      return;
+    }
+
+    const numSell = Math.max(0, Number(sellPrice) || 0);
+    const numAdm = Math.max(0, Number(adminFee) || 0);
+    const numTotal = numSell + numAdm;
+    const numPaidDp = paymentStatus === 'debt' ? Math.max(0, Number(paidAmount) || 0) : numTotal;
+    if (paymentStatus === 'debt' && numTotal > 0 && numPaidDp >= numTotal) {
+      setFeedback({
+        kind: 'err',
+        text: 'Nominal DP sudah menutup seluruh tagihan. Pilih status pembayaran Lunas.',
+      });
+      return;
+    }
+
     submitLockRef.current = true;
     setSaving(true);
 
@@ -210,10 +250,15 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
           category,
           providerName,
           targetNumber,
-          customerName,
+          customer: customerMatch.matchedCustomer,
+          customerName: customerInput,
+          autoCreateCustomer: customerMatch.isNewCustomer,
+          newCustomerPhone,
+          paymentStatus,
+          paidAmount: paymentStatus === 'debt' ? numPaidDp : undefined,
           capitalPrice: Number(capitalPrice) || 0,
-          sellPrice: Number(sellPrice) || 0,
-          adminFee: Number(adminFee) || 0,
+          sellPrice: numSell,
+          adminFee: numAdm,
           depositAccount: selectedDepositAccount,
           cashAccount: selectedCashAccount,
           serialNumber,
@@ -225,18 +270,31 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
         }
       );
 
+      const bonSuffix =
+        result.debtAmount > 0
+          ? ` Masuk Bon ${result.customerName || ''}: ${formatRupiah(result.debtAmount)}${
+              result.customerDebtAfter !== undefined
+                ? ` (Total Bon: ${formatRupiah(result.customerDebtAfter)})`
+                : ''
+            }.`
+          : '';
+
       setFeedback({
         kind: 'ok',
         text: isAdmin
-          ? `Transaksi PPOB ${result.transactionNumber} berhasil dicatat. Tagihan pelanggan: ${formatRupiah(
+          ? `Transaksi PPOB ${result.transactionNumber} berhasil dicatat. Tagihan: ${formatRupiah(
               result.customerTotal
-            )}, Laba: ${formatRupiah(result.netProfit)}.`
-          : `Transaksi PPOB ${result.transactionNumber} berhasil dicatat. Tagihan pelanggan: ${formatRupiah(
+            )}, Laba: ${formatRupiah(result.netProfit)}.${bonSuffix}`
+          : `Transaksi PPOB ${result.transactionNumber} berhasil dicatat. Tagihan: ${formatRupiah(
               result.customerTotal
-            )}.`,
+            )}.${bonSuffix}`,
       });
       setTargetNumber('');
-      setCustomerName('');
+      setSelectedCustomerId('');
+      setCustomerInput('');
+      setNewCustomerPhone('');
+      setPaymentStatus('paid');
+      setPaidAmount('0');
       setCapitalPrice('');
       setSellPrice('');
       setAdminFee('0');
@@ -275,10 +333,15 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
     setActionBusyId(txDoc.id);
     setFeedback(null);
     try {
-      await failAndRefundPpobTransaction(txDoc, accounts, {
-        uid: user.uid,
-        displayName: profile?.displayName || user.displayName || 'Petugas',
-      });
+      await failAndRefundPpobTransaction(
+        txDoc,
+        accounts,
+        {
+          uid: user.uid,
+          displayName: profile?.displayName || user.displayName || 'Petugas',
+        },
+        customers
+      );
       setFeedback({
         kind: 'ok',
         text: `Transaksi ${txDoc.transactionNumber} ditandai Gagal & saldo modal/kas telah dikembalikan.`,
@@ -474,7 +537,7 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-3">
               <div className="space-y-1">
                 <label htmlFor="ppob-target" className="block text-xs font-medium text-slate-700">
                   {currentCatMeta.targetLabel} *
@@ -492,20 +555,87 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                 />
               </div>
 
-              <div className="space-y-1">
-                <label htmlFor="ppob-cust" className="block text-xs font-medium text-slate-700">
-                  Nama Pelanggan (Opsional)
-                </label>
-                <input
-                  id="ppob-cust"
-                  type="text"
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  maxLength={100}
-                  placeholder="Nama pembeli"
-                  className="w-full min-h-[44px] px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                />
+              <CustomerBonCombobox
+                customers={customers}
+                selectedCustomerId={selectedCustomerId}
+                customerInput={customerInput}
+                newCustomerPhone={newCustomerPhone}
+                onSelectCustomer={(id, name) => {
+                  setSelectedCustomerId(id);
+                  setCustomerInput(name);
+                  setNewCustomerPhone('');
+                }}
+                onChangeInput={(nextText) => {
+                  setCustomerInput(nextText);
+                  setSelectedCustomerId('');
+                }}
+                onChangeNewPhone={setNewCustomerPhone}
+                onClear={() => {
+                  setSelectedCustomerId('');
+                  setCustomerInput('');
+                  setNewCustomerPhone('');
+                }}
+                label={paymentStatus === 'debt' ? 'Pelanggan (Wajib untuk Hutang/Bon)' : 'Pelanggan (Opsional / Otomatis Terdaftar)'}
+                placeholder="Ketik nama baru atau cari pelanggan..."
+                required={paymentStatus === 'debt'}
+                isDebtMode={paymentStatus === 'debt'}
+              />
+            </div>
+
+            {/* Status Pembayaran: Lunas vs Hutang (Bon) */}
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2.5">
+              <label className="block text-xs font-semibold text-slate-700">
+                Status Pembayaran Pelanggan
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentStatus('paid');
+                    setPaidAmount('0');
+                  }}
+                  className={`min-h-[40px] px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                    paymentStatus === 'paid'
+                      ? 'bg-emerald-700 border-emerald-700 text-white'
+                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  Lunas (Tunai / Transfer)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentStatus('debt')}
+                  className={`min-h-[40px] px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                    paymentStatus === 'debt'
+                      ? 'bg-amber-600 border-amber-600 text-white'
+                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  Hutang / Bon
+                </button>
               </div>
+
+              {paymentStatus === 'debt' && (
+                <div className="space-y-1.5 pt-1 border-t border-slate-200">
+                  <label htmlFor="ppob-paid-dp" className="block text-xs font-medium text-slate-700">
+                    Dibayar Sekarang / DP (Rp)
+                  </label>
+                  <input
+                    id="ppob-paid-dp"
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={paidAmount}
+                    onChange={(e) => setPaidAmount(e.target.value)}
+                    placeholder="0"
+                    className="w-full min-h-[40px] px-3 py-1.5 rounded-lg border border-amber-300 bg-white text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                  <p className="text-[11px] text-amber-800">
+                    Isi <strong>0</strong> jika seluruh tagihan masuk bon. Piutang otomatis
+                    digabung dengan bon Kasir &amp; Mini ATM pelanggan.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Modal, Harga Jual, Biaya Admin */}
@@ -657,11 +787,33 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                 <div className="flex justify-between items-center">
                   <span className="text-slate-600">
                     Masuk ke {selectedCashAccount?.name || 'Laci Kas'}
+                    {previewBreakdown.paymentStatus === 'debt' ? ' (DP)' : ''}
                   </span>
                   <span className="font-mono-num font-semibold text-emerald-700">
-                    +{formatRupiah(previewBreakdown.customerTotal)}
+                    +{formatRupiah(previewBreakdown.cashReceiptDelta)}
                   </span>
                 </div>
+                {previewBreakdown.paymentStatus === 'debt' && (
+                  <>
+                    <div className="flex justify-between items-center text-amber-800 font-semibold">
+                      <span>Masuk Bon / Piutang Pelanggan</span>
+                      <span className="font-mono-num">
+                        +{formatRupiah(previewBreakdown.debtAmount)}
+                      </span>
+                    </div>
+                    {customerMatch.matchedCustomer && (
+                      <div className="flex justify-between items-center text-[11px] text-amber-900 bg-amber-50 px-2 py-1 rounded border border-amber-200">
+                        <span>Total Gabungan Bon Nanti</span>
+                        <span className="font-mono-num font-bold">
+                          {formatRupiah(
+                            (Number(customerMatch.matchedCustomer.totalDebt) || 0) +
+                              previewBreakdown.debtAmount
+                          )}
+                        </span>
+                      </div>
+                    )}
+                  </>
+                )}
                 {isAdmin && (
                   <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
                     <span className="font-semibold text-slate-800">Laba Bersih PPOB</span>
@@ -799,20 +951,31 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                           </td>
                         )}
                         <td className="py-3 px-4 whitespace-nowrap">
-                          {tx.status === 'completed' ? (
-                            <span className="inline-block px-2 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-[11px] font-medium text-emerald-700">
-                              {getPpobStatusLabel(tx.status)}
-                            </span>
-                          ) : tx.status === 'pending' ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-amber-200 bg-amber-50 text-[11px] font-medium text-amber-800">
-                              <Clock className="w-3 h-3" />
-                              <span>{getPpobStatusLabel(tx.status)}</span>
-                            </span>
-                          ) : (
-                            <span className="inline-block px-2 py-0.5 rounded border border-red-200 bg-red-50 text-[11px] font-medium text-red-700">
-                              {getPpobStatusLabel(tx.status)}
-                            </span>
-                          )}
+                          <div className="flex flex-col items-start gap-1">
+                            {tx.status === 'completed' ? (
+                              <span className="inline-block px-2 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-[11px] font-medium text-emerald-700">
+                                {getPpobStatusLabel(tx.status)}
+                              </span>
+                            ) : tx.status === 'pending' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-amber-200 bg-amber-50 text-[11px] font-medium text-amber-800">
+                                <Clock className="w-3 h-3" />
+                                <span>{getPpobStatusLabel(tx.status)}</span>
+                              </span>
+                            ) : (
+                              <span className="inline-block px-2 py-0.5 rounded border border-red-200 bg-red-50 text-[11px] font-medium text-red-700">
+                                {getPpobStatusLabel(tx.status)}
+                              </span>
+                            )}
+                            {tx.paymentStatus === 'debt' ? (
+                              <span className="inline-block px-2 py-0.5 rounded border border-amber-300 bg-amber-50 text-[10px] font-semibold text-amber-900 font-mono-num">
+                                HUTANG (Bon {formatRupiah(tx.debtAmount ?? totalTagihan)})
+                              </span>
+                            ) : (
+                              <span className="inline-block px-2 py-0.5 rounded border border-slate-200 bg-slate-50 text-[10px] font-medium text-slate-700">
+                                LUNAS
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="py-3 px-4 text-right whitespace-nowrap">
                           <div className="inline-flex items-center gap-1.5">
@@ -863,8 +1026,8 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
 
       {/* Modal Input SN untuk Pending PPOB */}
       {completingTx && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-5 space-y-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md max-h-[90dvh] overflow-y-auto p-5 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div>
                 <h4 className="font-display font-bold text-base text-slate-900">
@@ -922,8 +1085,8 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
 
       {/* Modal Struk PPOB */}
       {receiptTx && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-5 space-y-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md max-h-[90dvh] overflow-y-auto p-5 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div>
                 <h4 className="font-display font-bold text-base text-slate-900">
@@ -997,11 +1160,47 @@ export function PpobPage({ accounts, storeSetting }: PpobPageProps) {
                 </span>
               </div>
               <div className="flex justify-between text-sm font-bold text-emerald-700 pt-1 border-t border-slate-200">
-                <span>Total Bayar</span>
+                <span>Total Tagihan</span>
                 <span className="font-mono-num">
                   {formatRupiah(Number(receiptTx.sellPrice) + Number(receiptTx.adminFee))}
                 </span>
               </div>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-600">Status Pembayaran</span>
+                <span
+                  className={`font-semibold px-2 py-0.5 rounded text-[11px] ${
+                    receiptTx.paymentStatus === 'debt'
+                      ? 'bg-amber-100 text-amber-900'
+                      : 'bg-emerald-100 text-emerald-800'
+                  }`}
+                >
+                  {receiptTx.paymentStatus === 'debt' ? 'HUTANG (BON)' : 'LUNAS'}
+                </span>
+              </div>
+              {receiptTx.paymentStatus === 'debt' && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Dibayar (DP)</span>
+                    <span className="font-mono-num text-slate-900">
+                      {formatRupiah(receiptTx.paidAmount ?? 0)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between font-semibold text-amber-800">
+                    <span>Masuk Bon / Piutang</span>
+                    <span className="font-mono-num">
+                      {formatRupiah(
+                        receiptTx.debtAmount ??
+                          Math.max(
+                            0,
+                            Number(receiptTx.sellPrice) +
+                              Number(receiptTx.adminFee) -
+                              (receiptTx.paidAmount ?? 0)
+                          )
+                      )}
+                    </span>
+                  </div>
+                </>
+              )}
               <div className="pt-2 border-t border-slate-100 text-[11px] text-slate-500 space-y-0.5">
                 <div>
                   Status: {getPpobStatusLabel(receiptTx.status)} · Deposit:{' '}

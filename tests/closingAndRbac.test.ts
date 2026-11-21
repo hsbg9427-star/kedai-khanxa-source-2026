@@ -12,6 +12,7 @@ import {
   ADMIN_ONLY_TABS,
   KASIR_ALLOWED_TABS,
   canAccessNavTab,
+  parseNavTab,
   resolveSafeNavTab,
 } from '../src/utils/rbac';
 import {
@@ -78,6 +79,13 @@ test('RBAC: Admin dapat mengakses seluruh modul sedangkan Kasir hanya modul oper
     assert.equal(canAccessNavTab(tab, false), true, `Kasir harus dapat mengakses ${tab}`);
     assert.equal(resolveSafeNavTab(tab, false), tab);
   }
+
+  assert.equal(parseNavTab('#mini_atm', false), 'mini_atm');
+  assert.equal(parseNavTab('ppob', true), 'ppob');
+  assert.equal(parseNavTab('#settings', false), 'dashboard');
+  assert.equal(parseNavTab('#settings', true), 'settings');
+  assert.equal(parseNavTab('#unknown_tab', true), 'dashboard');
+  assert.equal(parseNavTab(undefined, true), 'dashboard');
 });
 
 test('Closing Kasir memisahkan Tunai vs Non-Tunai (QRIS, Transfer, DANA, Mini ATM, PPOB, Piutang) dengan akurat', () => {

@@ -58,6 +58,7 @@ import {
 import { formatProductStockSummary } from '../utils/unitConversion';
 import { getReadableFirestoreError } from '../utils/firestoreError';
 import {
+  collectExpiryAlerts,
   evaluateBatchExpiry,
   EXPIRY_ESTIMATE_DISCLAIMER,
   formatShortIdDate,
@@ -161,29 +162,21 @@ export function DashboardPage({
         ...evaluateBatchExpiry(b, todayStr),
       }));
 
-    const expiredBatches = activePositive
-      .filter((b) => b.expiryStatus === 'EXPIRED')
-      .sort((a, b) => a.effectiveExpiryDate.localeCompare(b.effectiveExpiryDate));
+    const unifiedAlerts = collectExpiryAlerts(products, stockBatches, todayStr);
+    const expiredAlerts = unifiedAlerts.filter((a) => a.expiryStatus === 'EXPIRED');
+    const nearExpiryAlerts = unifiedAlerts.filter((a) => a.expiryStatus === 'MENDEKATI EXPIRED');
 
-    const nearExpiryBatches = activePositive
-      .filter((b) => b.expiryStatus === 'MENDEKATI EXPIRED')
-      .sort((a, b) => a.effectiveExpiryDate.localeCompare(b.effectiveExpiryDate));
-
-    const alertBatches = [...expiredBatches, ...nearExpiryBatches].sort((a, b) =>
-      a.effectiveExpiryDate.localeCompare(b.effectiveExpiryDate)
-    );
-
-    const nearExpiryProductCount = new Set(nearExpiryBatches.map((b) => b.productId)).size;
+    const nearExpiryProductCount = new Set(nearExpiryAlerts.map((a) => a.productId)).size;
 
     return {
       totalActiveBatchCount: activePositive.length,
-      expiredBatches,
-      nearExpiryBatches,
-      alertBatches,
+      expiredAlerts,
+      nearExpiryAlerts,
+      alertItems: unifiedAlerts,
       nearExpiryProductCount,
-      expiredBatchCount: expiredBatches.length,
+      expiredAlertCount: expiredAlerts.length,
     };
-  }, [stockBatches, todayStr]);
+  }, [products, stockBatches, todayStr]);
 
   const totalTransactions = metrics.retailSalesCount + metrics.miniAtmCount + metrics.ppobCount;
   const totalServiceProfit = metrics.miniAtmProfitTotal + metrics.ppobProfitTotal;
@@ -550,6 +543,107 @@ export function DashboardPage({
           </div>
         )}
       </div>
+
+      {/* Grafik Saldo Akun & Rekening */}
+      <section className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="space-y-1">
+            <h3 className="font-display font-semibold text-base text-slate-900 flex items-center gap-2">
+              <Landmark className="w-5 h-5 text-emerald-700" />
+              <span>Grafik &amp; Distribusi Saldo Kas &amp; Rekening</span>
+            </h3>
+            <p className="text-xs text-slate-500">
+              Proporsi dan rincian saldo aktif di setiap laci kas, rekening bank, dan dompet digital.
+            </p>
+          </div>
+          <div className="font-mono-num text-sm font-bold text-emerald-800 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200">
+            Total Saldo: {formatRupiah(totalBalance)}
+          </div>
+        </div>
+
+        {activeAccounts.length === 0 ? (
+          <div className="py-8 text-center text-xs text-slate-500">
+            Belum ada akun kas atau rekening aktif.
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {/* Proportional Stacked Bar Chart */}
+            <div className="space-y-1.5">
+              <div className="flex h-4 w-full rounded-full overflow-hidden bg-slate-100 border border-slate-200">
+                {activeAccounts.map((acc, idx) => {
+                  const bal = Math.max(0, Number(acc.balance) || 0);
+                  const pct = totalBalance > 0 ? (bal / totalBalance) * 100 : 0;
+                  const colors = [
+                    'bg-emerald-600',
+                    'bg-teal-600',
+                    'bg-cyan-600',
+                    'bg-blue-600',
+                    'bg-indigo-600',
+                    'bg-violet-600',
+                    'bg-amber-600',
+                  ];
+                  const color = colors[idx % colors.length];
+                  if (pct <= 0) return null;
+                  return (
+                    <div
+                      key={acc.id}
+                      style={{ width: `${Math.max(2, pct)}%` }}
+                      className={`${color} transition-all duration-500 hover:opacity-90 relative group cursor-pointer`}
+                      title={`${acc.name}: ${formatRupiah(bal)} (${pct.toFixed(1)}%)`}
+                    />
+                  );
+                })}
+              </div>
+              <div className="flex justify-between text-[10px] font-mono-num text-slate-500 px-1">
+                <span>0%</span>
+                <span>50%</span>
+                <span>100%</span>
+              </div>
+            </div>
+
+            {/* Account breakdown grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {activeAccounts.map((acc, idx) => {
+                const bal = Math.max(0, Number(acc.balance) || 0);
+                const pct = totalBalance > 0 ? ((bal / totalBalance) * 100).toFixed(1) : '0';
+                const colors = [
+                  'bg-emerald-50 border-emerald-200 text-emerald-800',
+                  'bg-teal-50 border-teal-200 text-teal-800',
+                  'bg-cyan-50 border-cyan-200 text-cyan-800',
+                  'bg-blue-50 border-blue-200 text-blue-800',
+                  'bg-indigo-50 border-indigo-200 text-indigo-800',
+                  'bg-violet-50 border-violet-200 text-violet-800',
+                ];
+                const badgeStyle = colors[idx % colors.length];
+                return (
+                  <div key={acc.id} className="rounded-xl border border-slate-200 p-3.5 space-y-2 bg-white shadow-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-xs sm:text-sm text-slate-900 truncate">
+                          {acc.name}
+                        </div>
+                        <div className="text-[10px] text-slate-500 uppercase tracking-wide">
+                          {getAccountTypeLabel(acc.type)}
+                        </div>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded-md border text-[10px] font-bold shrink-0 font-mono-num ${badgeStyle}`}>
+                        {pct}%
+                      </span>
+                    </div>
+
+                    <div className="flex items-end justify-between pt-1 border-t border-slate-100">
+                      <span className="text-[11px] text-slate-500">Saldo</span>
+                      <span className="font-mono-num font-bold text-sm sm:text-base text-slate-900">
+                        {formatRupiah(bal)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* Baris Target Penjualan & Ringkasan Mini ATM + PPOB */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
@@ -1004,28 +1098,29 @@ export function DashboardPage({
 
       {/* MONITORING KEDALUWARSA (Peringatan 30 Hari & Batch Kedaluwarsa) */}
       <section
+        id="monitoring-kedaluwarsa"
         aria-label="Monitoring Kedaluwarsa"
         className={`bg-white rounded-xl border overflow-hidden ${
-          expiryMonitoring.expiredBatchCount > 0
+          expiryMonitoring.expiredAlertCount > 0
             ? 'border-red-300'
-            : expiryMonitoring.nearExpiryBatches.length > 0
+            : expiryMonitoring.nearExpiryAlerts.length > 0
               ? 'border-amber-300'
               : 'border-slate-200'
         }`}
       >
         <div
           className={`px-5 py-4 border-b flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${
-            expiryMonitoring.expiredBatchCount > 0
+            expiryMonitoring.expiredAlertCount > 0
               ? 'bg-red-50/70 border-red-200'
-              : expiryMonitoring.nearExpiryBatches.length > 0
+              : expiryMonitoring.nearExpiryAlerts.length > 0
                 ? 'bg-amber-50/70 border-amber-200'
                 : 'bg-slate-50/70 border-slate-200'
           }`}
         >
           <div className="flex items-start gap-2.5">
-            {expiryMonitoring.expiredBatchCount > 0 ? (
+            {expiryMonitoring.expiredAlertCount > 0 ? (
               <ShieldAlert className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
-            ) : expiryMonitoring.nearExpiryBatches.length > 0 ? (
+            ) : expiryMonitoring.nearExpiryAlerts.length > 0 ? (
               <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
             ) : (
               <CalendarClock className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />
@@ -1035,7 +1130,7 @@ export function DashboardPage({
                 MONITORING KEDALUWARSA
               </h3>
               <p className="text-xs text-slate-600">
-                Peringatan otomatis mulai 30 hari sebelum kedaluwarsa per batch stok. Riwayat batch tidak dihapus otomatis.
+                Peringatan otomatis mulai 1 bulan (30 hari) sebelum expired untuk setiap produk &amp; batch stok. Riwayat batch tidak dihapus otomatis.
               </p>
             </div>
           </div>
@@ -1099,28 +1194,28 @@ export function DashboardPage({
               >
                 {expiryMonitoring.nearExpiryProductCount}{' '}
                 <span className="text-xs font-medium text-slate-500">
-                  produk ({expiryMonitoring.nearExpiryBatches.length} batch)
+                  produk ({expiryMonitoring.nearExpiryAlerts.length} item)
                 </span>
               </div>
             </div>
 
             <div
               className={`rounded-xl border p-3.5 ${
-                expiryMonitoring.expiredBatchCount > 0
+                expiryMonitoring.expiredAlertCount > 0
                   ? 'bg-red-50/70 border-red-200'
                   : 'bg-slate-50 border-slate-200'
               }`}
             >
               <div className="text-xs font-medium text-slate-600">
-                Batch Sudah Kedaluwarsa (EXPIRED)
+                Sudah Kedaluwarsa (EXPIRED)
               </div>
               <div
                 className={`font-mono-num text-2xl font-bold mt-1 ${
-                  expiryMonitoring.expiredBatchCount > 0 ? 'text-red-700' : 'text-slate-900'
+                  expiryMonitoring.expiredAlertCount > 0 ? 'text-red-700' : 'text-slate-900'
                 }`}
               >
-                {expiryMonitoring.expiredBatchCount}{' '}
-                <span className="text-xs font-medium text-slate-500">batch aktif</span>
+                {expiryMonitoring.expiredAlertCount}{' '}
+                <span className="text-xs font-medium text-slate-500">item aktif</span>
               </div>
             </div>
 
@@ -1133,15 +1228,15 @@ export function DashboardPage({
             </div>
           </div>
 
-          {expiryMonitoring.alertBatches.length === 0 ? (
+          {expiryMonitoring.alertItems.length === 0 ? (
             <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-5 flex items-center gap-3">
               <CheckCircle2 className="w-6 h-6 text-emerald-700 shrink-0" />
               <div>
                 <div className="text-sm font-semibold text-emerald-900">
-                  Tidak ada batch mendekati kedaluwarsa atau kedaluwarsa saat ini
+                  Tidak ada produk atau batch mendekati kedaluwarsa saat ini
                 </div>
                 <p className="text-xs text-emerald-800/80">
-                  Seluruh batch stok aktif berada pada status AMAN (&gt; 30 hari sebelum kedaluwarsa).
+                  Seluruh produk dan batch stok aktif berada pada status AMAN (&gt; 30 hari sebelum kedaluwarsa).
                 </p>
               </div>
             </div>
@@ -1151,7 +1246,7 @@ export function DashboardPage({
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
                     <th className="py-2.5 px-3.5 whitespace-nowrap">Produk &amp; Batch</th>
-                    <th className="py-2.5 px-3.5 whitespace-nowrap">Stok Batch Tersisa</th>
+                    <th className="py-2.5 px-3.5 whitespace-nowrap">Stok Tersisa</th>
                     <th className="py-2.5 px-3.5 whitespace-nowrap">Tanggal Kedaluwarsa</th>
                     <th className="py-2.5 px-3.5 whitespace-nowrap">Sisa Hari</th>
                     <th className="py-2.5 px-3.5 whitespace-nowrap">Status</th>
@@ -1159,36 +1254,36 @@ export function DashboardPage({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs sm:text-sm">
-                  {expiryMonitoring.alertBatches.map((b) => {
-                    const isExpired = b.expiryStatus === 'EXPIRED';
+                  {expiryMonitoring.alertItems.map((item) => {
+                    const isExpired = item.expiryStatus === 'EXPIRED';
                     return (
                       <tr
-                        key={b.id}
+                        key={item.id}
                         className={isExpired ? 'bg-red-50/50 hover:bg-red-50' : 'bg-amber-50/30 hover:bg-amber-50/60'}
                       >
                         <td className="py-3 px-3.5">
                           <div className="font-semibold text-slate-900">
                             {formatProductFullName({
-                              name: b.productName,
-                              brand: b.productBrand,
-                              variant: b.productVariant,
+                              name: item.productName,
+                              brand: item.productBrand,
+                              variant: item.productVariant,
                             })}
                           </div>
                           <div className="text-[11px] font-mono-num text-slate-500">
-                            {b.batchNumber}
-                            {b.sourceNumber ? ` · ${b.sourceNumber}` : ''}
-                            {b.supplierName ? ` · ${b.supplierName}` : ''}
+                            {item.batchNumber ? item.batchNumber : `Input ${formatShortIdDate(item.startDate)}`}
+                            {item.sourceNumber ? ` · ${item.sourceNumber}` : ''}
+                            {item.supplierName ? ` · ${item.supplierName}` : ''}
                           </div>
                         </td>
                         <td className="py-3 px-3.5 font-mono-num font-semibold text-slate-900 whitespace-nowrap">
-                          {formatQty(b.remainingBaseQty)} {b.baseUnit}
+                          {formatQty(item.remainingBaseQty)} {item.baseUnit}
                         </td>
                         <td className="py-3 px-3.5 whitespace-nowrap">
                           <div className="font-mono-num font-semibold text-slate-900">
-                            {formatShortIdDate(b.effectiveExpiryDate)}
+                            {formatShortIdDate(item.effectiveExpiryDate)}
                           </div>
                           <div className="text-[11px] text-slate-500">
-                            {b.isActualPackagingDate ? 'Kemasan Aktual' : 'Perkiraan +6 Bln'}
+                            {item.isActualPackagingDate ? 'Kemasan Aktual' : 'Perkiraan +6 Bln'}
                           </div>
                         </td>
                         <td
@@ -1196,7 +1291,7 @@ export function DashboardPage({
                             isExpired ? 'text-red-700' : 'text-amber-800'
                           }`}
                         >
-                          {b.remainingLabel}
+                          {item.remainingLabel}
                         </td>
                         <td className="py-3 px-3.5 whitespace-nowrap">
                           <span
@@ -1206,18 +1301,28 @@ export function DashboardPage({
                                 : 'bg-amber-100 text-amber-900 border border-amber-200'
                             }`}
                           >
-                            {b.expiryStatus}
+                            {item.expiryStatus}
                           </span>
                         </td>
                         <td className="py-3 px-3.5 text-right whitespace-nowrap">
                           {isAdmin ? (
-                            <button
-                              type="button"
-                              onClick={() => openBatchHandlingModal(b)}
-                              className="min-h-[34px] inline-flex items-center gap-1 px-3 py-1 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:border-emerald-600 hover:text-emerald-800 cursor-pointer"
-                            >
-                              <span>Detail / Tangani</span>
-                            </button>
+                            item.batch ? (
+                              <button
+                                type="button"
+                                onClick={() => item.batch && openBatchHandlingModal(item.batch)}
+                                className="min-h-[34px] inline-flex items-center gap-1 px-3 py-1 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:border-emerald-600 hover:text-emerald-800 cursor-pointer"
+                              >
+                                <span>Detail / Tangani</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => onNavigate('products')}
+                                className="min-h-[34px] inline-flex items-center gap-1 px-3 py-1 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:border-emerald-600 hover:text-emerald-800 cursor-pointer"
+                              >
+                                <span>Kelola di Produk</span>
+                              </button>
+                            )
                           ) : (
                             <span className="text-[11px] text-slate-500">Hubungi Admin</span>
                           )}

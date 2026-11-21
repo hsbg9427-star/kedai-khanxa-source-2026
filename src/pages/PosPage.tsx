@@ -18,6 +18,8 @@ import {
   Share2,
   AlertTriangle,
   ShieldAlert,
+  ChevronDown,
+  Wallet,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNetwork } from '../contexts/NetworkContext';
@@ -31,6 +33,7 @@ import type {
   StoreSetting,
 } from '../types/database';
 import {
+  createProductWithInitialStock,
   fetchSaleReceiptFromSale,
   formatProductStockSummary,
   formatUnitConversionLabel,
@@ -49,8 +52,9 @@ import { createCustomer } from '../services/receivableService';
 import { formatQty, formatRupiah } from '../utils/formatters';
 import { getReadableFirestoreError } from '../utils/firestoreError';
 import {
-  calculateSaleSettlement,
+  calculateCombinedPosSettlement,
   getEffectiveQrisFeePercent,
+  resolvePosCustomerMatch,
   type RetailPaymentMethod,
 } from '../utils/qrisFee';
 import {
@@ -149,6 +153,7 @@ export function PosPage({
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCat, setSelectedCat] = useState('all');
+  const [mobilePane, setMobilePane] = useState<'products' | 'cart'>('products');
   const [cart, setCart] = useState<RetailCartItem[]>([]);
   const [discount, setDiscount] = useState('0');
   const [paymentMethod, setPaymentMethod] = useState<RetailPaymentMethod>('cash');
@@ -159,11 +164,85 @@ export function PosPage({
   const [cashPart, setCashPart] = useState('');
   const [qrisPart, setQrisPart] = useState('');
   const [customerName, setCustomerName] = useState('');
+  const [newCustomerPhone, setNewCustomerPhone] = useState('');
+  const [receivablePayAmount, setReceivablePayAmount] = useState('');
+  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
+  const customerComboRef = useRef<HTMLDivElement | null>(null);
 
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
   const [quickCustName, setQuickCustName] = useState('');
   const [quickCustPhone, setQuickCustPhone] = useState('');
   const [creatingCust, setCreatingCust] = useState(false);
+
+  const [showQuickProductModal, setShowQuickProductModal] = useState(false);
+  const [newProdName, setNewProdName] = useState('');
+  const [newProdBrand, setNewProdBrand] = useState('');
+  const [newProdVariant, setNewProdVariant] = useState('');
+  const [newProdCategory, setNewProdCategory] = useState(categories[0]?.id || '');
+  const [newProdUnit, setNewProdUnit] = useState('PCS');
+  const [newProdStock, setNewProdStock] = useState('0');
+  const [newProdCost, setNewProdCost] = useState('0');
+  const [newProdSell, setNewProdSell] = useState('0');
+  const [creatingProduct, setCreatingProduct] = useState(false);
+
+  const handleQuickCreateProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !newProdName.trim()) return;
+    setCreatingProduct(true);
+    setFeedback(null);
+    try {
+      const selectedCatObj = categories.find((c) => c.id === newProdCategory) || categories[0];
+      const categoryName = selectedCatObj ? selectedCatObj.name : 'Umum';
+      const catId = selectedCatObj ? selectedCatObj.id : (categories[0]?.id || 'cat_produk_lainnya');
+      const generatedSku = `SKU-${Date.now().toString(36).toUpperCase()}`;
+
+      const createdId = await createProductWithInitialStock(
+        {
+          sku: generatedSku,
+          name: newProdName.trim(),
+          brand: newProdBrand.trim(),
+          variant: newProdVariant.trim(),
+          categoryId: catId,
+          categoryName,
+          unit: newProdUnit.trim() || 'PCS',
+          stock: Number(newProdStock) || 0,
+          costPrice: Number(newProdCost) || 0,
+          sellPrice: Number(newProdSell) || 0,
+          minStock: 5,
+          isActive: true,
+        },
+        {
+          uid: user.uid,
+          displayName: activeCashierName || profile?.displayName || user.displayName || 'Kasir',
+        },
+        products
+      );
+
+      const createdProd = products.find((p) => p.id === createdId);
+      if (createdProd) {
+        addToCart(createdProd);
+      }
+
+      setNewProdName('');
+      setNewProdBrand('');
+      setNewProdVariant('');
+      setNewProdStock('0');
+      setNewProdCost('0');
+      setNewProdSell('0');
+      setShowQuickProductModal(false);
+      setFeedback({
+        kind: 'ok',
+        text: 'Produk baru berhasil ditambahkan dan langsung dimasukkan ke keranjang.',
+      });
+    } catch (error) {
+      setFeedback({
+        kind: 'err',
+        text: getReadableFirestoreError(error),
+      });
+    } finally {
+      setCreatingProduct(false);
+    }
+  };
 
   const [processing, setProcessing] = useState(false);
   const checkoutLockRef = useRef(false);
@@ -180,15 +259,73 @@ export function PosPage({
   const [recentSales, setRecentSales] = useState<Sale[]>([]);
   const [showScanner, setShowScanner] = useState(false);
 
-  // Modal Persetujuan Admin untuk Penjualan Stok Kedaluwarsa (EXPIRED)
   const [expiredConflicts, setExpiredConflicts] = useState<ExpiredCartConflict[]>([]);
   const [showExpiredOverrideModal, setShowExpiredOverrideModal] = useState(false);
   const [expiredOverrideReason, setExpiredOverrideReason] = useState('');
 
+  const [activeCashierName, setActiveCashierName] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return (
+        localStorage.getItem('kedaikhanxa_active_cashier') ||
+        profile?.displayName ||
+        user?.displayName ||
+        'Kasir 1'
+      );
+    }
+    return profile?.displayName || user?.displayName || 'Kasir 1';
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && activeCashierName) {
+      localStorage.setItem('kedaikhanxa_active_cashier', activeCashierName);
+    }
+  }, [activeCashierName]);
+
   const activeAccounts = accounts.filter((a) => a.isActive);
   const activeProducts = products.filter((p) => p.isActive);
-  const selectedCustomer = customers.find((c) => c.id === selectedCustomerId) || null;
+  const customerMatch = useMemo(
+    () => resolvePosCustomerMatch(customers, customerName, selectedCustomerId),
+    [customers, customerName, selectedCustomerId]
+  );
+  const selectedCustomer = customerMatch.matchedCustomer;
+  const isAutoNewCustomer = customerMatch.isNewCustomer;
+  const customerPrevDebt = selectedCustomer
+    ? roundMoney(Math.max(0, Number(selectedCustomer.totalDebt) || 0))
+    : 0;
   const qrisFeePercent = getEffectiveQrisFeePercent(storeSetting);
+
+  useEffect(() => {
+    setReceivablePayAmount('');
+  }, [selectedCustomer?.id]);
+
+  useEffect(() => {
+    if (!showCustomerDropdown) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (customerComboRef.current && !customerComboRef.current.contains(e.target as Node)) {
+        setShowCustomerDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [showCustomerDropdown]);
+
+  const filteredCustomerOptions = useMemo(() => {
+    const q = customerName.trim().toLowerCase();
+    const sorted = [...customers].sort((a, b) => {
+      const aDebt = Number(a.totalDebt) > 0 ? 1 : 0;
+      const bDebt = Number(b.totalDebt) > 0 ? 1 : 0;
+      if (aDebt !== bDebt) return bDebt - aDebt;
+      return a.name.localeCompare(b.name, 'id');
+    });
+    if (!q || (selectedCustomer && q === selectedCustomer.name.trim().toLowerCase())) {
+      return sorted;
+    }
+    return sorted.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        (c.phone || '').toLowerCase().includes(q)
+    );
+  }, [customers, customerName, selectedCustomer]);
 
   const batchSummaryByProductId = useMemo(() => {
     const map = new Map<string, ProductBatchSummary>();
@@ -309,6 +446,15 @@ export function PosPage({
   const isMixedPayment = paymentMethod === 'mixed';
   const isQrisPayment = paymentMethod === 'qris';
 
+  const rawReceivablePayInput = roundMoney(Math.max(0, Number(receivablePayAmount) || 0));
+  const numReceivablePay =
+    !isDebtPayment && selectedCustomer && customerPrevDebt > 0
+      ? roundMoney(Math.min(customerPrevDebt, rawReceivablePayInput))
+      : 0;
+  const grandTotalDue = isDebtPayment
+    ? totalAmount
+    : roundMoney(totalAmount + numReceivablePay);
+
   const numCashPart = roundMoney(Math.max(0, Number(cashPart) || 0));
   const numQrisPart = roundMoney(Math.max(0, Number(qrisPart) || 0));
 
@@ -317,43 +463,63 @@ export function PosPage({
     : isMixedPayment
       ? roundMoney(numCashPart + numQrisPart)
       : paidAmount === ''
-        ? totalAmount
+        ? grandTotalDue
         : roundMoney(Math.max(0, Number(paidAmount) || 0));
 
-  const previewSettlement = (() => {
+  const previewCombined = (() => {
     try {
-      return calculateSaleSettlement({
-        totalAmount,
+      return calculateCombinedPosSettlement({
+        saleTotalAmount: totalAmount,
         paymentMethod,
         paidAmount: numPaid,
         cashPart: numCashPart,
         qrisPart: numQrisPart,
         qrisFeePercent,
+        customerPrevDebt,
+        receivablePayAmount: numReceivablePay,
       });
     } catch {
-      const qrisNominal = isQrisPayment ? totalAmount : isMixedPayment ? numQrisPart : 0;
-      const fee = roundMoney(qrisNominal * (qrisFeePercent / 100));
+      const saleQrisNominal = isQrisPayment
+        ? totalAmount
+        : isMixedPayment
+          ? Math.min(numQrisPart, totalAmount)
+          : 0;
+      const fee = roundMoney(saleQrisNominal * (qrisFeePercent / 100));
       return {
-        paymentMethod,
-        paidAmount: numPaid,
-        changeAmount: isDebtPayment ? 0 : Math.max(0, roundMoney(numPaid - totalAmount)),
-        debtAmount: isDebtPayment ? Math.max(0, roundMoney(totalAmount - numPaid)) : 0,
-        cashPaidPart: isDebtPayment ? numPaid : Math.max(0, roundMoney(totalAmount - qrisNominal)),
-        qrisAmount: qrisNominal,
-        qrisFeeRate: qrisNominal > 0 ? qrisFeePercent : 0,
-        qrisFeeAmount: fee,
-        netReceivedAmount: isDebtPayment
-          ? numPaid
-          : roundMoney(Math.max(0, totalAmount - fee)),
-        cashDepositAmount: isDebtPayment
-          ? numPaid
-          : Math.max(0, roundMoney(totalAmount - qrisNominal)),
-        qrisNetDepositAmount: roundMoney(Math.max(0, qrisNominal - fee)),
+        saleSettlement: {
+          paymentMethod,
+          paidAmount: numPaid,
+          changeAmount: isDebtPayment ? 0 : Math.max(0, roundMoney(numPaid - grandTotalDue)),
+          debtAmount: isDebtPayment ? Math.max(0, roundMoney(totalAmount - numPaid)) : 0,
+          cashPaidPart: isDebtPayment ? numPaid : Math.max(0, roundMoney(totalAmount - saleQrisNominal)),
+          qrisAmount: saleQrisNominal,
+          qrisFeeRate: saleQrisNominal > 0 ? qrisFeePercent : 0,
+          qrisFeeAmount: fee,
+          netReceivedAmount: isDebtPayment
+            ? numPaid
+            : roundMoney(Math.max(0, totalAmount - fee)),
+          cashDepositAmount: isDebtPayment
+            ? numPaid
+            : Math.max(0, roundMoney(totalAmount - saleQrisNominal)),
+          qrisNetDepositAmount: roundMoney(Math.max(0, saleQrisNominal - fee)),
+        },
+        receivablePaidAmount: numReceivablePay,
+        receivableCashIn:
+          paymentMethod === 'cash' || paymentMethod === 'transfer' ? numReceivablePay : 0,
+        receivableQrisIn: paymentMethod === 'qris' ? numReceivablePay : 0,
+        grandTotalDue,
+        grandPaidAmount: numPaid,
+        grandChangeAmount: isDebtPayment ? 0 : Math.max(0, roundMoney(numPaid - grandTotalDue)),
+        customerDebtBefore: customerPrevDebt,
+        customerDebtAfter: isDebtPayment
+          ? roundMoney(customerPrevDebt + Math.max(0, totalAmount - numPaid))
+          : roundMoney(Math.max(0, customerPrevDebt - numReceivablePay)),
       };
     }
   })();
 
-  const changeAmount = previewSettlement.changeAmount;
+  const previewSettlement = previewCombined.saleSettlement;
+  const changeAmount = previewCombined.grandChangeAmount;
   const debtAddition = previewSettlement.debtAmount;
 
   const addToCart = (product: Product, preferredUnitName?: string) => {
@@ -648,6 +814,8 @@ export function PosPage({
         }
       );
       setSelectedCustomerId(created.id);
+      setCustomerName(created.name);
+      setNewCustomerPhone('');
       setQuickCustName('');
       setQuickCustPhone('');
       setShowQuickCustomer(false);
@@ -658,7 +826,7 @@ export function PosPage({
     } catch (error) {
       setFeedback({
         kind: 'err',
-        text: error instanceof Error ? error.message : getReadableFirestoreError(error),
+        text: getReadableFirestoreError(error),
       });
     } finally {
       setCreatingCust(false);
@@ -743,7 +911,7 @@ export function PosPage({
     } catch (error) {
       setFeedback({
         kind: 'err',
-        text: error instanceof Error ? error.message : getReadableFirestoreError(error),
+        text: getReadableFirestoreError(error),
       });
     } finally {
       setLoadingReceiptId(null);
@@ -809,14 +977,17 @@ export function PosPage({
           account: isQrisPayment ? chosenQrisAccount : chosenCashAccount,
           qrisAccount: chosenQrisAccount,
           customer: selectedCustomer,
-          customerName: selectedCustomer ? selectedCustomer.name : customerName,
+          customerName: customerMatch.cleanName,
+          autoCreateCustomer: isAutoNewCustomer,
+          newCustomerPhone: isAutoNewCustomer ? newCustomerPhone : undefined,
+          receivablePayAmount: numReceivablePay,
           batches: stockBatches,
           allowExpiredOverride,
           expiredOverrideReason: overrideReason,
         },
         {
           uid: user.uid,
-          displayName: profile?.displayName || user.displayName || 'Kasir',
+          displayName: activeCashierName.trim() || profile?.displayName || user.displayName || 'Kasir 1',
         }
       );
 
@@ -826,36 +997,51 @@ export function PosPage({
       setCashPart('');
       setQrisPart('');
       setCustomerName('');
+      setNewCustomerPhone('');
+      setReceivablePayAmount('');
       setSelectedCustomerId('');
+      setShowCustomerDropdown(false);
       setPaymentMethod('cash');
       setShowExpiredOverrideModal(false);
       setExpiredConflicts([]);
       setExpiredOverrideReason('');
       setReceipt(result);
+
+      const newCustNote =
+        isAutoNewCustomer && result.customerName
+          ? ` Pelanggan baru "${result.customerName}" otomatis disimpan.`
+          : '';
+      const recPayNote =
+        (result.receivablePaidAmount || 0) > 0
+          ? ` Bayar piutang ${formatRupiah(result.receivablePaidAmount || 0)} (sisa ${formatRupiah(
+              result.customerDebtAfter ?? 0
+            )}).`
+          : '';
+
       setFeedback({
         kind: 'ok',
         text: isOnline
           ? result.debtAmount > 0
             ? `Kasbon ${result.transactionNumber} untuk ${result.customerName} dicatat (${formatRupiah(
                 result.debtAmount
-              )} masuk piutang).`
+              )} masuk piutang).${newCustNote}`
             : result.qrisFeeAmount > 0
               ? `Transaksi ${result.transactionNumber} selesai. Omzet ${formatRupiah(
                   result.totalAmount
                 )}, potongan QRIS ${formatRupiah(result.qrisFeeAmount)}, bersih ${formatRupiah(
                   result.netReceivedAmount
-                )}.`
+                )}.${recPayNote}${newCustNote}`
               : isAdmin
                 ? `Transaksi ${result.transactionNumber} selesai. Stok terpotong otomatis, laba tercatat ${formatRupiah(
                     result.totalProfit
-                  )}.`
-                : `Transaksi ${result.transactionNumber} selesai. Stok terpotong otomatis.`
-          : `Transaksi ${result.transactionNumber} disimpan lokal (offline) & stok langsung diperbarui.`,
+                  )}.${recPayNote}${newCustNote}`
+                : `Transaksi ${result.transactionNumber} selesai. Stok terpotong otomatis.${recPayNote}${newCustNote}`
+          : `Transaksi ${result.transactionNumber} disimpan lokal (offline) & stok langsung diperbarui.${recPayNote}${newCustNote}`,
       });
     } catch (error) {
       setFeedback({
         kind: 'err',
-        text: error instanceof Error ? error.message : getReadableFirestoreError(error),
+        text: getReadableFirestoreError(error),
       });
     } finally {
       setProcessing(false);
@@ -868,10 +1054,10 @@ export function PosPage({
     if (!user || syncedCart.length === 0 || checkoutLockRef.current) return;
 
     if (isDebtPayment) {
-      if (!selectedCustomer) {
+      if (!selectedCustomer && !isAutoNewCustomer) {
         setFeedback({
           kind: 'err',
-          text: 'Pilih pelanggan terdaftar untuk mencatat transaksi Kasbon / Piutang.',
+          text: 'Pilih atau ketik nama pelanggan terlebih dahulu untuk mencatat transaksi Kasbon / Piutang.',
         });
         return;
       }
@@ -882,31 +1068,48 @@ export function PosPage({
         });
         return;
       }
-    } else if (isMixedPayment) {
-      if (numQrisPart <= 0 || numCashPart <= 0) {
+    } else {
+      if (rawReceivablePayInput > customerPrevDebt + 0.001) {
         setFeedback({
           kind: 'err',
-          text: 'Pada pembayaran gabungan, nominal Tunai dan QRIS masing-masing harus lebih dari Rp0.',
+          text: `Nominal bayar piutang (${formatRupiah(
+            rawReceivablePayInput
+          )}) melebihi sisa piutang pelanggan (${formatRupiah(customerPrevDebt)}).`,
         });
         return;
       }
-      if (numQrisPart > totalAmount) {
+      if (isMixedPayment) {
+        if (numQrisPart <= 0 || numCashPart <= 0) {
+          setFeedback({
+            kind: 'err',
+            text: 'Pada pembayaran gabungan, nominal Tunai dan QRIS masing-masing harus lebih dari Rp0.',
+          });
+          return;
+        }
+        if (numQrisPart > grandTotalDue) {
+          setFeedback({
+            kind: 'err',
+            text: 'Nominal bagian QRIS tidak boleh melebihi total tagihan.',
+          });
+          return;
+        }
+        if (numPaid < grandTotalDue) {
+          setFeedback({
+            kind: 'err',
+            text: 'Total gabungan Tunai + QRIS kurang dari total tagihan.',
+          });
+          return;
+        }
+      } else if (numPaid < grandTotalDue) {
         setFeedback({
           kind: 'err',
-          text: 'Nominal bagian QRIS tidak boleh melebihi total tagihan.',
+          text:
+            numReceivablePay > 0
+              ? 'Nominal uang dibayar kurang dari total belanja + bayar piutang.'
+              : 'Nominal uang dibayar kurang dari total belanja.',
         });
         return;
       }
-      if (numPaid < totalAmount) {
-        setFeedback({
-          kind: 'err',
-          text: 'Total gabungan Tunai + QRIS kurang dari total belanja.',
-        });
-        return;
-      }
-    } else if (numPaid < totalAmount) {
-      setFeedback({ kind: 'err', text: 'Nominal uang dibayar kurang dari total belanja.' });
-      return;
     }
 
     const conflicts = inspectExpiredCartConflicts(syncedCart);
@@ -970,12 +1173,40 @@ export function PosPage({
         </div>
       )}
 
-      {/* Dua Kolom Berdampingan (Android & Desktop) dengan Scroll Terpisah */}
-      <div className="grid grid-cols-12 gap-2 sm:gap-4 items-stretch h-[calc(100dvh-9.75rem)] min-h-[480px] lg:h-[calc(100dvh-7.75rem)]">
+      {/* Pengalih Panel Mobile Portrait (<640px) agar form & katalog tidak sempit */}
+      <div className="sm:hidden grid grid-cols-2 gap-1.5 bg-white border border-slate-200 rounded-xl p-1">
+        <button
+          type="button"
+          onClick={() => setMobilePane('products')}
+          className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+            mobilePane === 'products'
+              ? 'bg-emerald-700 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-50'
+          }`}
+        >
+          Produk ({filteredProducts.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobilePane('cart')}
+          className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer truncate ${
+            mobilePane === 'cart'
+              ? 'bg-emerald-700 text-white shadow-sm'
+              : 'text-slate-700 bg-emerald-50/60 hover:bg-emerald-50'
+          }`}
+        >
+          Keranjang ({formatQty(totalCartQty)} · {formatRupiah(grandTotalDue)})
+        </button>
+      </div>
+
+      {/* Dua Kolom Berdampingan pada Landscape / Tablet / Desktop dengan Scroll Terpisah */}
+      <div className="grid grid-cols-12 gap-2 sm:gap-4 items-stretch h-[calc(100dvh-12rem)] min-h-[360px] sm:h-[calc(100dvh-8.75rem)] sm:min-h-[280px] [@media(orientation:landscape)_and_(max-height:500px)]:h-[calc(100dvh-5.75rem)] lg:h-[calc(100dvh-7.75rem)] lg:min-h-[480px]">
         {/* Kiri: Daftar Produk Kasir (Scroll Terpisah) */}
         <section
           aria-label="Daftar Produk Kasir"
-          className="col-span-6 lg:col-span-7 flex flex-col min-h-0 bg-white border border-slate-200 rounded-xl overflow-hidden"
+          className={`${
+            mobilePane === 'products' ? 'flex' : 'hidden sm:flex'
+          } col-span-12 sm:col-span-6 lg:col-span-7 flex-col min-h-0 bg-white border border-slate-200 rounded-xl overflow-hidden`}
         >
           <div className="shrink-0 p-2 sm:p-3 border-b border-slate-200 bg-white space-y-2">
             <div className="flex flex-col sm:flex-row gap-1.5 sm:gap-2">
@@ -1002,6 +1233,22 @@ export function PosPage({
                 </button>
               </div>
 
+              <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs shrink-0">
+                <span className="font-semibold text-slate-600 whitespace-nowrap">Kasir:</span>
+                <select
+                  value={activeCashierName}
+                  onChange={(e) => setActiveCashierName(e.target.value)}
+                  aria-label="Pilih Kasir / Operator"
+                  className="bg-transparent font-semibold text-emerald-800 focus:outline-none cursor-pointer"
+                >
+                  <option value="Kasir 1">Kasir 1</option>
+                  <option value="Kasir 2">Kasir 2</option>
+                  <option value="Kasir Shift Pagi">Shift Pagi</option>
+                  <option value="Kasir Shift Sore">Shift Sore</option>
+                  {profile?.displayName && <option value={profile.displayName}>{profile.displayName}</option>}
+                </select>
+              </div>
+
               <select
                 value={selectedCat}
                 onChange={(e) => setSelectedCat(e.target.value)}
@@ -1015,6 +1262,16 @@ export function PosPage({
                   </option>
                 ))}
               </select>
+
+              <button
+                type="button"
+                onClick={() => setShowQuickProductModal(true)}
+                aria-label="Tambah Produk Baru"
+                className="min-h-[38px] sm:min-h-[44px] px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 inline-flex items-center justify-center gap-1.5 text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Produk Baru</span>
+              </button>
             </div>
           </div>
 
@@ -1029,7 +1286,7 @@ export function PosPage({
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2 sm:gap-2.5">
+              <div className="grid grid-cols-2 xl:grid-cols-3 gap-2 sm:gap-2.5">
                 {filteredProducts.map((p) => {
                   const usedInCart = getTotalBaseUsedForProduct(syncedCart, p.id);
                   const remaining = Math.max(0, snapStockToProductPrecision(p.stock - usedInCart, p));
@@ -1180,7 +1437,9 @@ export function PosPage({
         <form
           onSubmit={handleCheckout}
           aria-label="Keranjang Kasir"
-          className="col-span-6 lg:col-span-5 flex flex-col min-h-0 bg-white border border-slate-200 rounded-xl overflow-hidden"
+          className={`${
+            mobilePane === 'cart' ? 'flex' : 'hidden sm:flex'
+          } col-span-12 sm:col-span-6 lg:col-span-5 flex-col min-h-0 bg-white border border-slate-200 rounded-xl overflow-hidden`}
         >
           <div className="shrink-0 px-2.5 py-2 sm:px-4 sm:py-3 border-b border-slate-200 flex items-center justify-between gap-1 bg-white">
             <div className="flex items-center gap-1.5 min-w-0">
@@ -1403,10 +1662,12 @@ export function PosPage({
                       setPaymentMethod(next);
                       if (next === 'debt') {
                         setPaidAmount('');
+                        setReceivablePayAmount('');
                       } else if (next === 'mixed') {
-                        const half = Math.round(totalAmount / 2);
+                        const baseDue = roundMoney(totalAmount + numReceivablePay);
+                        const half = Math.round(baseDue / 2);
                         setQrisPart(String(half));
-                        setCashPart(String(roundMoney(Math.max(0, totalAmount - half))));
+                        setCashPart(String(roundMoney(Math.max(0, baseDue - half))));
                       }
                     }}
                     className="w-full min-h-[38px] sm:min-h-[40px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
@@ -1420,86 +1681,281 @@ export function PosPage({
                 </div>
               </div>
 
-              {isDebtPayment ? (
-                <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 space-y-1.5">
-                  <div className="flex flex-wrap items-center justify-between gap-1">
-                    <label htmlFor="pos-cust-select" className="block text-[11px] sm:text-xs font-semibold text-amber-900">
-                      Pelanggan Kasbon *
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowQuickCustomer(true)}
-                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer"
-                    >
-                      <UserPlus className="w-3 h-3" />
-                      <span>+ Baru</span>
-                    </button>
-                  </div>
-                  <select
-                    id="pos-cust-select"
-                    value={selectedCustomerId}
-                    onChange={(e) => setSelectedCustomerId(e.target.value)}
-                    className="w-full min-h-[38px] px-2.5 py-1.5 rounded-lg border border-amber-300 text-xs sm:text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+              {/* Pelanggan / Pembeli Unified Combobox (Otomatis Daftarkan Nama Baru & Tampilkan Piutang Aktif) */}
+              <div
+                ref={customerComboRef}
+                className={`p-2.5 rounded-lg border space-y-2 ${
+                  isDebtPayment
+                    ? 'bg-amber-50 border-amber-200'
+                    : 'bg-slate-50 border-slate-200'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-1">
+                  <label
+                    htmlFor="pos-customer-input"
+                    className={`block text-[11px] sm:text-xs font-semibold ${
+                      isDebtPayment ? 'text-amber-900' : 'text-slate-700'
+                    }`}
                   >
-                    <option value="">-- Pilih Pelanggan --</option>
-                    {customers.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                        {c.phone ? ` · ${c.phone}` : ''}
-                        {c.totalDebt > 0 ? ` (Piutang ${formatRupiah(c.totalDebt)})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                  {selectedCustomer && (
-                    <div className="text-[10px] sm:text-[11px] font-mono-num text-amber-800 space-y-0.5">
-                      <div>
-                        Kasbon akhir: <strong>{formatRupiah(selectedCustomer.totalDebt + debtAddition)}</strong>
-                      </div>
-                      <div>WA: {selectedCustomer.phone ? selectedCustomer.phone : 'Belum ada'}</div>
-                    </div>
-                  )}
+                    {isDebtPayment ? 'Pelanggan Kasbon *' : 'Pelanggan / Pembeli'}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowQuickCustomer(true)}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer"
+                  >
+                    <UserPlus className="w-3 h-3" />
+                    <span>+ Form Lengkap</span>
+                  </button>
                 </div>
-              ) : (
-                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5">
-                  <div className="flex flex-wrap items-center justify-between gap-1">
-                    <label htmlFor="pos-cust-select" className="block text-[11px] sm:text-xs font-medium text-slate-700">
-                      Pelanggan (Opsional)
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowQuickCustomer(true)}
-                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer"
-                    >
-                      <UserPlus className="w-3 h-3" />
-                      <span>+ Baru</span>
-                    </button>
-                  </div>
-                  <select
-                    id="pos-cust-select"
-                    value={selectedCustomerId}
+
+                <div className="relative">
+                  <input
+                    id="pos-customer-input"
+                    type="text"
+                    maxLength={100}
+                    autoComplete="off"
+                    value={customerName}
+                    onFocus={() => setShowCustomerDropdown(true)}
                     onChange={(e) => {
-                      setSelectedCustomerId(e.target.value);
-                      if (e.target.value) setCustomerName('');
+                      const val = e.target.value;
+                      setCustomerName(val);
+                      setSelectedCustomerId('');
+                      setShowCustomerDropdown(true);
                     }}
-                    className="w-full min-h-[38px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                  >
-                    <option value="">Umum / Tanpa Pelanggan</option>
-                    {customers.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                        {c.phone ? ` · WA ${c.phone}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                  {selectedCustomer && (
-                    <div className="text-[10px] sm:text-[11px] text-emerald-700 font-medium truncate">
-                      {selectedCustomer.phone
-                        ? `WA: ${formatWhatsAppDisplayPhone(selectedCustomer.phone)}`
-                        : 'Belum ada nomor WA'}
+                    placeholder={
+                      isDebtPayment
+                        ? 'Ketik / pilih nama pelanggan...'
+                        : 'Ketik / pilih nama (kosong = Umum)'
+                    }
+                    className={`w-full min-h-[38px] pl-2.5 pr-14 py-1.5 rounded-lg border text-xs sm:text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600 ${
+                      isDebtPayment ? 'border-amber-300' : 'border-slate-300'
+                    }`}
+                  />
+                  <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
+                    {(customerName || selectedCustomerId) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomerName('');
+                          setSelectedCustomerId('');
+                          setNewCustomerPhone('');
+                          setReceivablePayAmount('');
+                          setShowCustomerDropdown(false);
+                        }}
+                        aria-label="Hapus pilihan pelanggan"
+                        className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-slate-700 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomerDropdown((prev) => !prev)}
+                      aria-label="Buka daftar pelanggan"
+                      className="w-6 h-6 rounded flex items-center justify-center text-slate-500 hover:bg-slate-100 cursor-pointer"
+                    >
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {showCustomerDropdown && (
+                    <div className="absolute z-30 left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg divide-y divide-slate-100 text-xs">
+                      {isAutoNewCustomer && (
+                        <button
+                          type="button"
+                          onClick={() => setShowCustomerDropdown(false)}
+                          className="w-full text-left px-2.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-medium flex items-center justify-between gap-2 cursor-pointer"
+                        >
+                          <span className="truncate">
+                            + Otomatis daftarkan: <strong>"{customerMatch.cleanName}"</strong>
+                          </span>
+                          <span className="text-[10px] font-semibold text-emerald-700 shrink-0">
+                            Baru
+                          </span>
+                        </button>
+                      )}
+                      {filteredCustomerOptions.length === 0 ? (
+                        <div className="px-2.5 py-2 text-[11px] text-slate-500">
+                          {isAutoNewCustomer
+                            ? 'Nama baru akan langsung tersimpan sebagai pelanggan saat checkout.'
+                            : 'Belum ada pelanggan terdaftar.'}
+                        </div>
+                      ) : (
+                        filteredCustomerOptions.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedCustomerId(c.id);
+                              setCustomerName(c.name);
+                              setNewCustomerPhone('');
+                              setShowCustomerDropdown(false);
+                            }}
+                            className={`w-full text-left px-2.5 py-2 hover:bg-slate-50 flex items-center justify-between gap-2 cursor-pointer ${
+                              selectedCustomer?.id === c.id ? 'bg-emerald-50/70' : ''
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="font-medium text-slate-900 truncate">{c.name}</div>
+                              {c.phone && (
+                                <div className="text-[10px] font-mono-num text-slate-500 truncate">
+                                  WA {formatWhatsAppDisplayPhone(c.phone)}
+                                </div>
+                              )}
+                            </div>
+                            {c.totalDebt > 0 && (
+                              <span className="text-[10px] font-mono-num font-semibold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded shrink-0">
+                                Piutang {formatRupiah(c.totalDebt)}
+                              </span>
+                            )}
+                          </button>
+                        ))
+                      )}
                     </div>
                   )}
                 </div>
-              )}
+
+                {/* Info Pelanggan Baru Otomatis + Input No WA Opsional */}
+                {isAutoNewCustomer && (
+                  <div className="p-2 rounded-md bg-emerald-50 border border-emerald-200 space-y-1.5">
+                    <div className="text-[11px] font-medium text-emerald-900 leading-snug">
+                      Pelanggan baru <strong>"{customerMatch.cleanName}"</strong> akan otomatis
+                      disimpan ke daftar Pelanggan saat transaksi selesai.
+                    </div>
+                    <input
+                      type="text"
+                      maxLength={24}
+                      value={newCustomerPhone}
+                      onChange={(e) => setNewCustomerPhone(e.target.value)}
+                      placeholder="No. HP / WhatsApp (opsional)"
+                      aria-label="No HP pelanggan baru opsional"
+                      className="w-full min-h-[34px] px-2.5 py-1 rounded-md border border-emerald-300 bg-white text-[11px] font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                    />
+                  </div>
+                )}
+
+                {/* Info Pelanggan Terdaftar & Piutang Aktif (Muncul Otomatis) */}
+                {selectedCustomer && (
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] sm:text-[11px] text-slate-600">
+                      <span className="font-medium text-emerald-800 truncate">
+                        Terdaftar: {selectedCustomer.name}
+                      </span>
+                      <span className="font-mono-num">
+                        {selectedCustomer.phone
+                          ? `WA ${formatWhatsAppDisplayPhone(selectedCustomer.phone)}`
+                          : 'Belum ada WA'}
+                      </span>
+                    </div>
+
+                    {customerPrevDebt > 0 && (
+                      <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 space-y-2">
+                        <div className="flex items-center justify-between gap-2 text-[11px] sm:text-xs">
+                          <span className="inline-flex items-center gap-1 font-semibold text-amber-900">
+                            <Wallet className="w-3.5 h-3.5 shrink-0" />
+                            <span>Piutang Pelanggan</span>
+                          </span>
+                          <span className="font-mono-num font-bold text-amber-900">
+                            {formatRupiah(customerPrevDebt)}
+                          </span>
+                        </div>
+
+                        {isDebtPayment ? (
+                          <div className="text-[10px] sm:text-[11px] font-mono-num text-amber-800">
+                            Total piutang setelah kasbon ini:{' '}
+                            <strong>{formatRupiah(customerPrevDebt + debtAddition)}</strong>
+                          </div>
+                        ) : (
+                          <div className="space-y-1.5">
+                            <label
+                              htmlFor="pos-rec-pay"
+                              className="block text-[11px] font-medium text-amber-900"
+                            >
+                              Bayar Piutang Sekaligus (Rp)
+                            </label>
+                            <input
+                              id="pos-rec-pay"
+                              type="number"
+                              min="0"
+                              max={customerPrevDebt}
+                              value={receivablePayAmount}
+                              onChange={(e) => setReceivablePayAmount(e.target.value)}
+                              placeholder="0 (kosongkan jika tidak bayar piutang)"
+                              className="w-full min-h-[36px] px-2.5 py-1 rounded-md border border-amber-300 bg-white text-xs font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                            />
+                            <div className="flex flex-wrap gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setReceivablePayAmount('');
+                                  if (isMixedPayment) {
+                                    setCashPart(String(roundMoney(Math.max(0, totalAmount - numQrisPart))));
+                                  }
+                                }}
+                                className={`px-2 py-1 rounded text-[10px] font-semibold border cursor-pointer ${
+                                  numReceivablePay === 0
+                                    ? 'bg-slate-800 text-white border-slate-800'
+                                    : 'bg-white text-slate-700 border-amber-300 hover:bg-amber-100'
+                                }`}
+                              >
+                                Tidak Bayar
+                              </button>
+                              {customerPrevDebt >= 2000 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const halfDebt = Math.round(customerPrevDebt / 2);
+                                    setReceivablePayAmount(String(halfDebt));
+                                    if (isMixedPayment) {
+                                      setCashPart(
+                                        String(roundMoney(Math.max(0, totalAmount + halfDebt - numQrisPart)))
+                                      );
+                                    }
+                                  }}
+                                  className="px-2 py-1 rounded text-[10px] font-semibold border border-amber-300 bg-white text-amber-900 hover:bg-amber-100 cursor-pointer"
+                                >
+                                  50% ({formatRupiah(Math.round(customerPrevDebt / 2))})
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setReceivablePayAmount(String(customerPrevDebt));
+                                  if (isMixedPayment) {
+                                    setCashPart(
+                                      String(
+                                        roundMoney(Math.max(0, totalAmount + customerPrevDebt - numQrisPart))
+                                      )
+                                    );
+                                  }
+                                }}
+                                className={`px-2 py-1 rounded text-[10px] font-semibold border cursor-pointer ${
+                                  numReceivablePay === customerPrevDebt
+                                    ? 'bg-emerald-700 text-white border-emerald-700'
+                                    : 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                                }`}
+                              >
+                                Lunasi ({formatRupiah(customerPrevDebt)})
+                              </button>
+                            </div>
+                            {numReceivablePay > 0 && (
+                              <div className="flex items-center justify-between text-[10px] sm:text-[11px] font-mono-num text-emerald-800 pt-0.5">
+                                <span>Sisa piutang nanti:</span>
+                                <strong>
+                                  {previewCombined.customerDebtAfter <= 0
+                                    ? 'LUNAS (Rp0)'
+                                    : formatRupiah(previewCombined.customerDebtAfter)}
+                                </strong>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
 
               {/* Akun Penerima Tunai / Transfer / DP */}
               {((!isDebtPayment && !isQrisPayment) || (isDebtPayment && numPaid > 0)) && (
@@ -1556,94 +2012,62 @@ export function PosPage({
               )}
 
               {isMixedPayment ? (
-                <div className="space-y-2">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <div className="space-y-1">
-                      <label htmlFor="pos-qris-part" className="block text-[11px] sm:text-xs font-medium text-slate-700">
-                        Bagian QRIS (Rp)
-                      </label>
-                      <input
-                        id="pos-qris-part"
-                        type="number"
-                        min="1"
-                        max={totalAmount > 0 ? totalAmount : undefined}
-                        value={qrisPart}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          setQrisPart(raw);
-                          const parsed = roundMoney(Math.max(0, Number(raw) || 0));
-                          if (parsed <= totalAmount) {
-                            setCashPart(String(roundMoney(totalAmount - parsed)));
-                          }
-                        }}
-                        placeholder="0"
-                        className="w-full min-h-[38px] sm:min-h-[40px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label htmlFor="pos-cash-part" className="block text-[11px] sm:text-xs font-medium text-slate-700">
-                        Bagian Tunai (Rp)
-                      </label>
-                      <input
-                        id="pos-cash-part"
-                        type="number"
-                        min="1"
-                        value={cashPart}
-                        onChange={(e) => setCashPart(e.target.value)}
-                        placeholder="0"
-                        className="w-full min-h-[38px] sm:min-h-[40px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                      />
-                    </div>
-                  </div>
-                  {!selectedCustomer && (
-                    <div className="space-y-1">
-                      <label htmlFor="pos-cust" className="block text-[11px] sm:text-xs font-medium text-slate-700">
-                        Nama Pembeli (Opsional)
-                      </label>
-                      <input
-                        id="pos-cust"
-                        type="text"
-                        maxLength={100}
-                        value={customerName}
-                        onChange={(e) => setCustomerName(e.target.value)}
-                        placeholder="Umum"
-                        className="w-full min-h-[38px] sm:min-h-[40px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                      />
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className={isDebtPayment || selectedCustomer ? 'space-y-1' : 'grid grid-cols-1 sm:grid-cols-2 gap-2'}>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <div className="space-y-1">
-                    <label htmlFor="pos-paid" className="block text-[11px] sm:text-xs font-medium text-slate-700">
-                      {isDebtPayment ? 'Uang Muka / DP (Rp)' : 'Uang Dibayar (Rp)'}
+                    <label htmlFor="pos-qris-part" className="block text-[11px] sm:text-xs font-medium text-slate-700">
+                      Bagian QRIS (Rp)
                     </label>
                     <input
-                      id="pos-paid"
+                      id="pos-qris-part"
                       type="number"
-                      min="0"
-                      value={paidAmount}
-                      onChange={(e) => setPaidAmount(e.target.value)}
-                      placeholder={isDebtPayment ? '0 (Kasbon Penuh)' : String(totalAmount)}
+                      min="1"
+                      max={grandTotalDue > 0 ? grandTotalDue : undefined}
+                      value={qrisPart}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setQrisPart(raw);
+                        const parsed = roundMoney(Math.max(0, Number(raw) || 0));
+                        if (parsed <= grandTotalDue) {
+                          setCashPart(String(roundMoney(grandTotalDue - parsed)));
+                        }
+                      }}
+                      placeholder="0"
                       className="w-full min-h-[38px] sm:min-h-[40px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
                     />
                   </div>
-                  {!isDebtPayment && !selectedCustomer && (
-                    <div className="space-y-1">
-                      <label htmlFor="pos-cust" className="block text-[11px] sm:text-xs font-medium text-slate-700">
-                        Nama Pembeli (Opsional)
-                      </label>
-                      <input
-                        id="pos-cust"
-                        type="text"
-                        maxLength={100}
-                        value={customerName}
-                        onChange={(e) => setCustomerName(e.target.value)}
-                        placeholder="Umum"
-                        className="w-full min-h-[38px] sm:min-h-[40px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                      />
-                    </div>
-                  )}
+                  <div className="space-y-1">
+                    <label htmlFor="pos-cash-part" className="block text-[11px] sm:text-xs font-medium text-slate-700">
+                      Bagian Tunai (Rp)
+                    </label>
+                    <input
+                      id="pos-cash-part"
+                      type="number"
+                      min="1"
+                      value={cashPart}
+                      onChange={(e) => setCashPart(e.target.value)}
+                      placeholder="0"
+                      className="w-full min-h-[38px] sm:min-h-[40px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <label htmlFor="pos-paid" className="block text-[11px] sm:text-xs font-medium text-slate-700">
+                    {isDebtPayment
+                      ? 'Uang Muka / DP (Rp)'
+                      : numReceivablePay > 0
+                        ? 'Total Uang Dibayar (Belanja + Piutang)'
+                        : 'Uang Dibayar (Rp)'}
+                  </label>
+                  <input
+                    id="pos-paid"
+                    type="number"
+                    min="0"
+                    value={paidAmount}
+                    onChange={(e) => setPaidAmount(e.target.value)}
+                    placeholder={isDebtPayment ? '0 (Kasbon Penuh)' : String(grandTotalDue)}
+                    className="w-full min-h-[38px] sm:min-h-[40px] px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs sm:text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
                 </div>
               )}
 
@@ -1676,7 +2100,7 @@ export function PosPage({
                         </span>
                       </div>
                       <div className="flex justify-between items-center text-emerald-700">
-                        <span>Masuk Saldo Bersih</span>
+                        <span>Masuk Saldo Bersih (Belanja)</span>
                         <span className="font-mono-num font-bold">
                           {formatRupiah(previewSettlement.netReceivedAmount)}
                         </span>
@@ -1691,10 +2115,24 @@ export function PosPage({
           {/* Footer Tetap Bawah: Total Tagihan & Tombol Proses */}
           <div className="shrink-0 border-t border-slate-200 bg-slate-50 p-2.5 sm:p-3.5 space-y-2">
             <div className="space-y-0.5">
+              {numReceivablePay > 0 && !isDebtPayment && (
+                <>
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600 font-mono-num">
+                    <span>Total Belanja</span>
+                    <span>{formatRupiah(totalAmount)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-amber-800 font-mono-num">
+                    <span>Bayar Piutang Lama</span>
+                    <span>+{formatRupiah(numReceivablePay)}</span>
+                  </div>
+                </>
+              )}
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] sm:text-xs font-medium text-slate-700">Total Tagihan</span>
+                <span className="text-[11px] sm:text-xs font-medium text-slate-700">
+                  {numReceivablePay > 0 && !isDebtPayment ? 'Total Harus Dibayar' : 'Total Tagihan'}
+                </span>
                 <span className="font-mono-num text-sm sm:text-lg font-bold text-slate-900">
-                  {formatRupiah(totalAmount)}
+                  {formatRupiah(grandTotalDue)}
                 </span>
               </div>
               <div className="flex items-center justify-between gap-2 text-[11px] font-mono-num">
@@ -1776,6 +2214,11 @@ export function PosPage({
                           {s.customerName}
                         </div>
                       )}
+                      {s.receivablePaidAmount && s.receivablePaidAmount > 0 ? (
+                        <div className="text-[10px] font-sans font-semibold text-amber-700">
+                          +Bayar Piutang {formatRupiah(s.receivablePaidAmount)}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="py-3 px-4 text-xs text-slate-700 whitespace-nowrap">
                       {s.recordedByName}
@@ -1822,10 +2265,10 @@ export function PosPage({
 
       {/* Modal Tambah Pelanggan Cepat dari Kasir */}
       {showQuickCustomer && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4">
           <form
             onSubmit={handleQuickCreateCustomer}
-            className="bg-white border border-slate-200 rounded-xl max-w-sm w-full p-5 space-y-4"
+            className="bg-white border border-slate-200 rounded-xl max-w-sm w-full max-h-[90dvh] overflow-y-auto p-5 space-y-4"
           >
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <h3 className="font-display font-semibold text-base text-slate-900">
@@ -1893,7 +2336,7 @@ export function PosPage({
       {/* Modal Simulasi Cetak Struk Sederhana & Kirim WhatsApp */}
       {receipt && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4">
-          <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full max-h-[92vh] overflow-y-auto p-5 space-y-4">
+          <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full max-h-[90dvh] overflow-y-auto p-5 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div>
                 <div className="font-display font-bold text-base text-slate-900">
@@ -2014,9 +2457,27 @@ export function PosPage({
                     </div>
                   )}
                   <div className="flex justify-between text-sm font-bold text-slate-900 pt-1">
-                    <span>Total</span>
+                    <span>Total Belanja</span>
                     <span className="font-mono-num">{formatRupiah(receipt.totalAmount)}</span>
                   </div>
+                  {(receipt.receivablePaidAmount || 0) > 0 && (
+                    <>
+                      <div className="flex justify-between text-amber-800">
+                        <span>Bayar Piutang Sebelumnya</span>
+                        <span className="font-mono-num">
+                          +{formatRupiah(receipt.receivablePaidAmount || 0)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-sm font-bold text-slate-900 border-t border-slate-200 pt-1">
+                        <span>Total Harus Dibayar</span>
+                        <span className="font-mono-num">
+                          {formatRupiah(
+                            receipt.totalAmount + (receipt.receivablePaidAmount || 0)
+                          )}
+                        </span>
+                      </div>
+                    </>
+                  )}
                   {receipt.debtAmount > 0 ? (
                     <>
                       <div className="flex justify-between">
@@ -2024,9 +2485,17 @@ export function PosPage({
                         <span className="font-mono-num">{formatRupiah(receipt.paidAmount)}</span>
                       </div>
                       <div className="flex justify-between font-semibold text-amber-700">
-                        <span>Masuk Piutang (Kasbon)</span>
+                        <span>Masuk Piutang (Kasbon Baru)</span>
                         <span className="font-mono-num">{formatRupiah(receipt.debtAmount)}</span>
                       </div>
+                      {receipt.customerDebtAfter !== undefined && (
+                        <div className="flex justify-between font-semibold text-amber-900">
+                          <span>Total Piutang Sekarang</span>
+                          <span className="font-mono-num">
+                            {formatRupiah(receipt.customerDebtAfter)}
+                          </span>
+                        </div>
+                      )}
                     </>
                   ) : (
                     <>
@@ -2042,7 +2511,7 @@ export function PosPage({
                       </div>
                       {receipt.paymentMethod === 'mixed' && (
                         <div className="flex justify-between text-[11px] text-slate-500">
-                          <span>Rincian Tunai / QRIS</span>
+                          <span>Rincian Belanja (Tunai / QRIS)</span>
                           <span className="font-mono-num">
                             {formatRupiah(receipt.cashPaidPart)} / {formatRupiah(receipt.qrisAmount)}
                           </span>
@@ -2052,6 +2521,18 @@ export function PosPage({
                         <span>Kembalian</span>
                         <span className="font-mono-num">{formatRupiah(receipt.changeAmount)}</span>
                       </div>
+                      {receipt.customerDebtAfter !== undefined &&
+                        ((receipt.receivablePaidAmount || 0) > 0 ||
+                          (receipt.customerDebtBefore || 0) > 0) && (
+                          <div className="flex justify-between font-semibold text-amber-900">
+                            <span>Sisa Piutang Pelanggan</span>
+                            <span className="font-mono-num">
+                              {receipt.customerDebtAfter <= 0
+                                ? 'LUNAS (Rp0)'
+                                : formatRupiah(receipt.customerDebtAfter)}
+                            </span>
+                          </div>
+                        )}
                     </>
                   )}
                   {receipt.qrisFeeAmount > 0 && (
@@ -2283,10 +2764,10 @@ export function PosPage({
 
       {/* Modal Persetujuan Admin untuk Penjualan Stok Kedaluwarsa */}
       {showExpiredOverrideModal && isAdmin && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4">
           <form
             onSubmit={handleConfirmExpiredOverride}
-            className="bg-white border border-red-300 rounded-xl max-w-md w-full p-5 space-y-4 shadow-xl"
+            className="bg-white border border-red-300 rounded-xl max-w-md w-full max-h-[90dvh] overflow-y-auto p-5 space-y-4 shadow-xl"
           >
             <div className="flex items-start justify-between gap-2 border-b border-red-100 pb-3">
               <div className="flex items-start gap-2.5">
@@ -2370,6 +2851,174 @@ export function PosPage({
                 className="min-h-[42px] px-4 py-2 rounded-lg bg-red-700 text-white text-xs font-semibold hover:bg-red-800 disabled:opacity-50 cursor-pointer"
               >
                 {processing ? 'Memproses...' : 'Setujui & Lanjutkan Penjualan'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showQuickProductModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <form
+            onSubmit={handleQuickCreateProduct}
+            className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-4 sm:p-6 space-y-4 my-auto border border-slate-100"
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                  <Package className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-display font-bold text-sm sm:text-base text-slate-900">
+                    Tambah Produk Baru di Kasir
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Produk langsung tersimpan dan dimasukkan ke keranjang kasir
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowQuickProductModal(false)}
+                className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-800 mb-1">
+                  Nama Produk *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newProdName}
+                  onChange={(e) => setNewProdName(e.target.value.toUpperCase())}
+                  placeholder="Contoh: Minyak Goreng Bimoli 1L"
+                  className="w-full min-h-[40px] px-3 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-800 mb-1">
+                    Merek / Pabrikan
+                  </label>
+                  <input
+                    type="text"
+                    value={newProdBrand}
+                    onChange={(e) => setNewProdBrand(e.target.value.toUpperCase())}
+                    placeholder="Contoh: Bimoli"
+                    className="w-full min-h-[40px] px-3 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-800 mb-1">
+                    Varian / Ukuran
+                  </label>
+                  <input
+                    type="text"
+                    value={newProdVariant}
+                    onChange={(e) => setNewProdVariant(e.target.value.toUpperCase())}
+                    placeholder="Contoh: Refill 1L"
+                    className="w-full min-h-[40px] px-3 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-800 mb-1">
+                    Kategori *
+                  </label>
+                  <select
+                    value={newProdCategory}
+                    onChange={(e) => setNewProdCategory(e.target.value)}
+                    className="w-full min-h-[40px] px-3 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  >
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-800 mb-1">
+                    Satuan Dasar *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newProdUnit}
+                    onChange={(e) => setNewProdUnit(e.target.value.toUpperCase())}
+                    placeholder="Pcs / Bks / Botol"
+                    className="w-full min-h-[40px] px-3 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600 font-mono-num"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-800 mb-1">
+                    Stok Awal
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={newProdStock}
+                    onChange={(e) => setNewProdStock(e.target.value)}
+                    className="w-full min-h-[40px] px-3 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600 font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-800 mb-1">
+                    Harga Beli (HPP)
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={newProdCost}
+                    onChange={(e) => setNewProdCost(e.target.value)}
+                    className="w-full min-h-[40px] px-3 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600 font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-800 mb-1">
+                    Harga Jual *
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    required
+                    value={newProdSell}
+                    onChange={(e) => setNewProdSell(e.target.value)}
+                    className="w-full min-h-[40px] px-3 py-2 rounded-lg border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600 font-mono-num"
+                  />
+                </div>
+              </div>
+
+              <p className="text-[11px] text-slate-500 italic">
+                * Masa kedaluwarsa otomatis diset 6 bulan dari hari ini, dengan pemberitahuan 1 bulan sebelum expired.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowQuickProductModal(false)}
+                className="min-h-[40px] px-4 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                disabled={creatingProduct || !newProdName.trim()}
+                className="min-h-[40px] px-4 py-2 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 disabled:opacity-50 cursor-pointer"
+              >
+                {creatingProduct ? 'Menyimpan...' : 'Simpan & Tambah ke Keranjang'}
               </button>
             </div>
           </form>
